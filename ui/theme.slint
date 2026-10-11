@@ -77,6 +77,7 @@ export struct ParamItem {
     index: int,        // 下拉 / 页签当前选中的下标
     stacked: bool,     // 标签在上、编辑框占满一行（表达式、路径等长内容）
     pick: bool,        // 旁边有“选列”按钮（弹出选列框，pick.rs）
+    pick-ranges: bool, // 按钮是“范围”：按位置的范围编辑器（pick.rs）
 }
 
 // 可添加的节点种类

@@ -101,6 +101,8 @@ struct App {
     completion_start: usize,
     /// 开着的选列框（参数旁边的“选列”）
     pick: Option<pick::PickState>,
+    /// “按位置”参数的范围编辑器（pick.rs）
+    ranges: Option<pick::RangeState>,
     /// Tab 菜单当前列出的搜索结果
     search_hits: Vec<nodes::Hit>,
     /// Tab 菜单里写的是一段表达式：第一项是“按文字建节点”，建的就是它

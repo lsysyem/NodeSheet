@@ -727,3 +727,261 @@ export component PickPopup inherits Card {
         }
     }
 }
+
+// “按位置”参数的一段范围：起、止都是序号（第几列）或列名（按它当时的位置算）
+export struct RangeRow {
+    start: string,
+    end: string,
+}
+
+// 范围编辑器（pick.rs 的 RangeState）：一段段“起:止”，运行时按当时表的列序展开
+export global RangePick {
+    in-out property <bool> open;
+    in-out property <length> anchor-x;
+    in-out property <length> anchor-y;
+    // 拖过之后的位置（x/y = 0 表示没拖过，贴着按钮开）
+    in-out property <length> box-x;
+    in-out property <length> box-y;
+    in property <string> title;
+    in property <[string]> columns;  // 上游的列（下拉选；空 = 还没算出来，直接填序号）
+    in property <[RangeRow]> rows;
+    in property <string> code;       // 现在这些段写成的文字
+    in property <bool> ok-enabled;
+    in property <string> note;       // 原来的写法读不回来之类的提醒
+
+    callback cancel();
+    callback accept();
+    callback add-row();
+    callback remove-row(int);
+    callback row-start(int, string);
+    callback row-end(int, string);
+    callback row-picked(int, int, int);  // 行, 0 起 / 1 止, 列的下标
+}
+
+// 一段范围：序号直接填，列名从下拉里点（点了填进左边的框）
+component RangeRowCard inherits Rectangle {
+    in property <RangeRow> item;
+    in property <int> index;
+    border-radius: 6px;
+    background: Theme.surface-alt;
+    border-width: 1px;
+    border-color: Theme.border;
+
+    HorizontalLayout {
+        padding: 6px;
+        spacing: 6px;
+
+        Label { width: 20px; text: "起"; vertical-alignment: center; }
+        LineEdit {
+            width: 72px;
+            text: root.item.start;
+            placeholder-text: "序号";
+            edited(t) => { RangePick.row-start(root.index, t); }
+        }
+        ComboBox {
+            width: 128px;
+            model: RangePick.columns;
+            current-index: -1;
+            enabled: RangePick.columns.length > 0;
+            selected => { RangePick.row-picked(root.index, 0, self.current-index); }
+        }
+        Label { width: 20px; text: "止"; vertical-alignment: center; }
+        LineEdit {
+            width: 72px;
+            text: root.item.end;
+            placeholder-text: "序号";
+            edited(t) => { RangePick.row-end(root.index, t); }
+        }
+        ComboBox {
+            width: 128px;
+            model: RangePick.columns;
+            current-index: -1;
+            enabled: RangePick.columns.length > 0;
+            selected => { RangePick.row-picked(root.index, 1, self.current-index); }
+        }
+        VerticalLayout {
+            alignment: center;
+            IconButton {
+                small: true;
+                icon: Icons.close;
+                clicked => { RangePick.remove-row(root.index); }
+            }
+        }
+    }
+}
+
+export component RangePopup inherits Card {
+    in property <length> avail-w;
+    in property <length> avail-h;
+
+    width: min(560px, root.avail-w - 16px);
+    height: min(lay.preferred-height, root.avail-h - 16px);
+    x: max(8px, min(RangePick.box-x > 0px ? RangePick.box-x : RangePick.anchor-x - self.width, root.avail-w - self.width - 8px));
+    y: max(8px, min(RangePick.box-y > 0px ? RangePick.box-y : RangePick.anchor-y + 4px, root.avail-h - self.height - 8px));
+
+    // 吃掉框里的点击和滚轮，不传给下面
+    TouchArea {
+        scroll-event(e) => { EventResult.accept }
+    }
+
+    keys := FocusScope {
+        capture-key-pressed(e) => {
+            if (e.text == Key.Escape) {
+                RangePick.cancel();
+                return accept;
+            }
+            if (e.text == Key.Return && e.modifiers.control && RangePick.ok-enabled) {
+                RangePick.accept();
+                return accept;
+            }
+            reject
+        }
+        // 框里没用掉的键到这为止：别冒泡到主窗口（Delete 会删节点、Ctrl+Z 会撤销节点图）
+        key-pressed(e) => { accept }
+
+        lay := VerticalLayout {
+            padding: 12px;
+            spacing: 8px;
+
+            // 标题：按住拖动，框跟着挪
+            Rectangle {
+                height: 28px;
+                head-ta := TouchArea {
+                    mouse-cursor: move;
+                    moved => {
+                        if (self.pressed) {
+                            RangePick.box-x = root.x + (self.mouse-x - self.pressed-x);
+                            RangePick.box-y = root.y + (self.mouse-y - self.pressed-y);
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: "范围";
+                        color: Theme.text;
+                        font-size: 14px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: RangePick.title;
+                        color: Theme.text-muted;
+                        font-size: 12px;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
+                    IconButton {
+                        small: true;
+                        icon: Icons.close;
+                        clicked => { RangePick.cancel(); }
+                    }
+                }
+            }
+
+            Text {
+                text: "每段从“起”到“止”（含两端），运行时按当时表的列序展开，上游换了列跟着走。"
+                    + "填序号（第几列，1 起），或从下拉里选一个列名（按它当时的位置算）；一段是一行，“＋ 加一段”加。";
+                color: Theme.text-faint;
+                font-size: 11.5px;
+                wrap: word-wrap;
+            }
+
+            // 各段
+            Rectangle {
+                vertical-stretch: 1;
+                min-height: 40px;
+                preferred-height: min(max(RangePick.rows.length, 1), 6) * 40px;
+                border-radius: 4px;
+                border-width: 1px;
+                border-color: Theme.border;
+                background: Theme.field;
+                clip: true;
+
+                if RangePick.rows.length == 0: Text {
+                    text: RangePick.columns.length == 0 ? "还没有范围。上游的列还没算出来时可以直接填序号。"
+                        : "还没有范围，点下面的“＋ 加一段”。";
+                    color: Theme.text-faint;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                ScrollView {
+                    rows-box := VerticalLayout {
+                        spacing: 6px;
+                        padding: 6px;
+                        padding-right: 12px;
+                        for r[ri] in RangePick.rows: RangeRowCard {
+                            item: r;
+                            index: ri;
+                        }
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                SmallButton {
+                    text: "＋ 加一段";
+                    clicked => { RangePick.add-row(); }
+                }
+            }
+
+            // 写法
+            Rectangle {
+                border-radius: 4px;
+                background: Theme.surface-alt;
+                VerticalLayout {
+                    padding: 8px;
+                    spacing: 4px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Label {
+                            width: 32px;
+                            text: "写法";
+                            vertical-alignment: top;
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: RangePick.code == "" ? "（空）" : RangePick.code;
+                            color: RangePick.code == "" ? Theme.text-faint : Theme.text;
+                            font-family: "Consolas";
+                            font-size: 12px;
+                            wrap: char-wrap;
+                        }
+                    }
+                }
+            }
+
+            if RangePick.note != "": Text {
+                text: RangePick.note;
+                color: Theme.warn;
+                font-size: 11.5px;
+                wrap: word-wrap;
+            }
+
+            // 底下：取消 / 确定
+            HorizontalLayout {
+                spacing: 8px;
+                Rectangle { horizontal-stretch: 1; }
+                Text {
+                    text: "Ctrl+回车 确定 · Esc 取消";
+                    color: Theme.text-faint;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
+                Button {
+                    text: "取消";
+                    clicked => { RangePick.cancel(); }
+                }
+                Button {
+                    text: "确定";
+                    primary: true;
+                    enabled: RangePick.ok-enabled;
+                    clicked => { RangePick.accept(); }
+                }
+            }
+        }
+    }
+}

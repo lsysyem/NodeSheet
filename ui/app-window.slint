@@ -9,10 +9,10 @@ import { Shelf } from "shelf.slint";
 import { HelpWindow } from "help.slint";
 import { MenuTitle, MenuEntry, MenuSeparator2, MenuPanel } from "menubar.slint";
 import { TypeEditor, TypeEdit, EdParam, EdDetail, EdType, EdSource, EdRef } from "type-editor.slint";
-import { PickPopup, ColPick, PickCol, PickRow } from "pick.slint";
+import { PickPopup, ColPick, PickCol, PickRow, RangePick, RangePopup, RangeRow } from "pick.slint";
 export { ColumnSpec, RowData, NodeItem, WireItem, CompletionItem, CodeEdit, ParamItem, KindItem, PortItem, HelpBlock, RecentItem }
 export { TypeEdit, EdParam, EdDetail, EdType, EdSource, EdRef }
-export { ColPick, PickCol, PickRow }
+export { ColPick, PickCol, PickRow, RangePick, RangeRow }
 
 export component AppWindow inherits Window {
     title: (root.modified ? "● " : "") + (root.project-name == "" ? "" : root.project-name + " · ")
@@ -851,6 +851,8 @@ export component AppWindow inherits Window {
                 open-pick(a0, a1, a2) => {
                     ColPick.anchor-x = a1;
                     ColPick.anchor-y = a2;
+                    RangePick.anchor-x = a1;
+                    RangePick.anchor-y = a2;
                     ColPick.open-param(a0);
                 }
                 node-press(a0, a1, a2, a3, a4, a5) => { root.node-press(a0, a1, a2, a3, a4, a5); }
@@ -1000,6 +1002,18 @@ export component AppWindow inherits Window {
             background: Theme.shadow.transparentize(0.6);
         }
         if ColPick.open: PickPopup {
+            avail-w: key-scope.width;
+            avail-h: key-scope.height;
+        }
+
+        // 范围编辑器（参数旁边的“范围”）：同选列框，开着时别处点不了，Esc / 取消 / ✕ 关
+        if RangePick.open: TouchArea {
+            scroll-event(e) => { EventResult.accept }
+        }
+        if RangePick.open: Rectangle {
+            background: Theme.shadow.transparentize(0.6);
+        }
+        if RangePick.open: RangePopup {
             avail-w: key-scope.width;
             avail-h: key-scope.height;
         }

@@ -547,13 +547,13 @@ export component NodePanel inherits Rectangle {
                             edited(text) => { root.param-edited(p.id, text); }
                             accepted(text) => { root.param-accepted(p.id); }
                         }
-                        // 收列名的参数：弹出选列框（pick.rs）
+                        // 收列名的参数：弹出选列框（pick.rs）；按位置的范围：弹出范围编辑器
                         if p.pick && (p.kind == 0 || p.kind == 8): VerticalLayout {
                             alignment: center;
                             pick-btn := IconButton {
                                 small: true;
                                 icon: Icons.columns;
-                                label: "选列";
+                                label: p.pick-ranges ? "范围" : "选列";
                                 clicked => {
                                     root.open-pick(p.id, pick-btn.absolute-position.x + pick-btn.width - root.origin-x,
                                         pick-btn.absolute-position.y + pick-btn.height - root.origin-y);

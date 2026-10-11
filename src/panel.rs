@@ -347,6 +347,7 @@ pub(crate) fn push_graph(app: &AppWindow, st: &App, with_params: bool) {
                                 || matches!(p.kind, ParamKind::Dict | ParamKind::Kwargs)
                                 || (!in_net && p.insert() != nodes::ColInsert::None),
                             pick: !button && wired.is_none() && pick::available(st, &path, node.id, i),
+                            pick_ranges: !button && wired.is_none() && p.pick() == nodes::Pick::Ranges,
                         }
                     })
                     .collect();

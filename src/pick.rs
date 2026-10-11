@@ -1632,7 +1632,21 @@ pub(crate) fn install(app: &AppWindow, state: &Arc<Mutex<App>>) {
     let cp = app.global::<ColPick>();
     {
         let (weak, state) = (app.as_weak(), state.clone());
-        cp.on_open_param(move |param| open(&weak, &state, param.max(0) as usize));
+        cp.on_open_param(move |param| {
+            // “按位置”参数（pick = ranges）走范围编辑器，别的走选列框
+            let ranges = (|| {
+                let st = state.lock().unwrap();
+                let (path, node) = st.param_target();
+                let node = node?;
+                let n = st.graph_at(&path).and_then(|g| g.node(node))?;
+                Some(n.kind().params[param.max(0) as usize].pick() == Pick::Ranges)
+            })() == Some(true);
+            if ranges {
+                open_ranges(&weak, &state, param.max(0) as usize);
+            } else {
+                open(&weak, &state, param.max(0) as usize);
+            }
+        });
     }
     {
         let (weak, state) = (app.as_weak(), state.clone());
@@ -1933,6 +1947,68 @@ pub(crate) fn install(app: &AppWindow, state: &Arc<Mutex<App>>) {
             });
         });
     }
+
+    // ---- 范围编辑器（“按位置”参数）
+    let rp = app.global::<RangePick>();
+    {
+        let (weak, state) = (app.as_weak(), state.clone());
+        rp.on_cancel(move || close_ranges(&weak, &state));
+    }
+    {
+        let (weak, state) = (app.as_weak(), state.clone());
+        rp.on_accept(move || accept_ranges(&weak, &state));
+    }
+    {
+        let (weak, state) = (app.as_weak(), state.clone());
+        rp.on_add_row(move || {
+            update_ranges_later(&weak, &state, |p| p.rows.push((RangeSide::Open, RangeSide::Open)));
+        });
+    }
+    {
+        let (weak, state) = (app.as_weak(), state.clone());
+        rp.on_remove_row(move |i| {
+            update_ranges_later(&weak, &state, move |p| {
+                if (i as usize) < p.rows.len() {
+                    p.rows.remove(i as usize);
+                }
+            })
+        });
+    }
+    {
+        let (weak, state) = (app.as_weak(), state.clone());
+        rp.on_row_start(move |i, text| {
+            update_ranges(&weak, &state, |p| {
+                if let Some(row) = p.rows.get_mut(i.max(0) as usize) {
+                    row.0 = range_side(&text);
+                }
+            })
+        });
+    }
+    {
+        let (weak, state) = (app.as_weak(), state.clone());
+        rp.on_row_end(move |i, text| {
+            update_ranges(&weak, &state, |p| {
+                if let Some(row) = p.rows.get_mut(i.max(0) as usize) {
+                    row.1 = range_side(&text);
+                }
+            })
+        });
+    }
+    {
+        // 下拉选了列：填进那一端（按它当时的位置算，存列名）
+        let (weak, state) = (app.as_weak(), state.clone());
+        rp.on_row_picked(move |i, which, at| {
+            let name = state.lock().unwrap().ranges.as_ref()
+                .and_then(|p| p.columns.get(at.max(0) as usize).cloned());
+            let Some(name) = name else { return };
+            let side = RangeSide::Name(name);
+            update_ranges(&weak, &state, move |p| {
+                if let Some(row) = p.rows.get_mut(i.max(0) as usize) {
+                    if which == 0 { row.0 = side.clone(); } else { row.1 = side; }
+                }
+            })
+        });
+    }
 }
 
 /// 打字时那一行“还要填什么”的提示跟着变（只改那一行的提示，不动输入框）。
@@ -1948,6 +2024,245 @@ fn refresh_row_note(weak: &slint::Weak<AppWindow>, state: &Arc<Mutex<App>>, i: i
             rows.set_row_data(i as usize, item);
         }
     }
+}
+
+// ---------------------------------------------------------------- 范围编辑器（“按位置”参数）
+
+/// 一段的端点：序号（第几列）、列名（按它当时的位置算）、开口（:5 / 1: / :）。
+#[derive(Clone, PartialEq, Debug)]
+enum RangeSide {
+    Num(u32),
+    Name(String),
+    Open,
+}
+
+pub(crate) struct RangeState {
+    /// 改哪个参数：节点所在的图的路径、节点、参数下标
+    path: Vec<u32>,
+    node: u32,
+    param: usize,
+    /// 上游的列（下拉选；空 = 还没算出来，直接填序号）
+    columns: Vec<String>,
+    /// 一段段 (起, 止)
+    rows: Vec<(RangeSide, RangeSide)>,
+}
+
+/// 按分隔符拆开，引号里的不算（和 select.py 的 split_top 一个规则）。
+fn split_top(text: &str, sep: char) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut buf = String::new();
+    let mut quote = ' ';
+    let mut esc = false;
+    for ch in text.chars() {
+        if esc {
+            buf.push(ch);
+            esc = false;
+        } else if quote != ' ' {
+            if ch == '\\' {
+                esc = true;
+            }
+            buf.push(ch);
+            if ch == quote {
+                quote = ' ';
+            }
+        } else if ch == '"' || ch == '\'' {
+            quote = ch;
+            buf.push(ch);
+        } else if ch == '\\' {
+            esc = true;
+            buf.push(ch);
+        } else if ch == sep {
+            parts.push(std::mem::take(&mut buf));
+        } else {
+            buf.push(ch);
+        }
+    }
+    parts.push(buf);
+    parts
+}
+
+/// 端点的文字 → 端点：带引号的去引号是列名，纯数字是序号，裸的按列名，空是开口。
+fn range_side(text: &str) -> RangeSide {
+    let t = text.trim();
+    if t.is_empty() {
+        return RangeSide::Open;
+    }
+    if t.len() >= 2
+        && let (a, b) = (t.chars().next().unwrap(), t.chars().last().unwrap())
+        && (a == '"' || a == '\'') && a == b
+    {
+        let inner = &t[1..t.len() - 1];
+        let mut out = String::new();
+        let mut esc = false;
+        for ch in inner.chars() {
+            if esc {
+                out.push(ch);
+                esc = false;
+            } else if ch == '\\' {
+                esc = true;
+            } else {
+                out.push(ch);
+            }
+        }
+        return RangeSide::Name(out);
+    }
+    match t.parse::<u32>() {
+        Ok(n) => RangeSide::Num(n),
+        Err(_) => RangeSide::Name(t.to_string()),
+    }
+}
+
+impl RangeSide {
+    /// 编辑框里显示的：序号是数字，列名不带引号，开口是空。
+    fn display(&self) -> String {
+        match self {
+            RangeSide::Num(n) => n.to_string(),
+            RangeSide::Name(name) => name.clone(),
+            RangeSide::Open => String::new(),
+        }
+    }
+
+    /// 写进参数的：序号直接写，列名没有特殊字符时也不带引号，其余加引号转义。
+    fn text(&self) -> String {
+        match self {
+            RangeSide::Open => String::new(),
+            RangeSide::Num(n) => n.to_string(),
+            RangeSide::Name(name) => {
+                let plain = !name.is_empty()
+                    && !name.chars().all(|c| c.is_ascii_digit())
+                    && !name.chars().any(|c| ",:\"'\\".contains(c) || c.is_whitespace());
+                if plain {
+                    name.clone()
+                } else {
+                    format!("\"{}\"", name.replace('\\', "\\\\").replace('"', "\\\""))
+                }
+            }
+        }
+    }
+}
+
+/// 参数的“按位置”文字 → 一段段；写法不认识（空段、没有冒号）时是 None。
+fn parse_ranges(text: &str) -> Option<Vec<(RangeSide, RangeSide)>> {
+    if text.trim().is_empty() {
+        return Some(Vec::new());
+    }
+    let mut rows = Vec::new();
+    for seg in split_top(text, ',') {
+        let seg = seg.trim();
+        if seg.is_empty() {
+            return None;
+        }
+        let ends = split_top(seg, ':');
+        if ends.len() != 2 {
+            return None;
+        }
+        rows.push((range_side(&ends[0]), range_side(&ends[1])));
+    }
+    Some(rows)
+}
+
+/// 一段段 → 参数的文字（两端都空的段不算）。
+fn ranges_text(rows: &[(RangeSide, RangeSide)]) -> String {
+    rows.iter()
+        .filter(|(a, b)| !matches!((a, b), (RangeSide::Open, RangeSide::Open)))
+        .map(|(a, b)| format!("{}:{}", a.text(), b.text()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// 点了参数旁边的“范围”：读回原来的写法，弹出范围编辑器。
+fn open_ranges(weak: &slint::Weak<AppWindow>, state: &Arc<Mutex<App>>, param: usize) {
+    let Some(app) = weak.upgrade() else { return };
+    let mut st = state.lock().unwrap();
+    let (path, Some(node)) = st.param_target() else { return };
+    let Some(n) = st.graph_at(&path).and_then(|g| g.node(node)) else { return };
+    let def = &n.kind().params[param];
+    let value = n.params[param].clone();
+    let title = format!("{} · {}", n.title, def.label);
+    let columns: Vec<String> = match source_of(&st, &path, node, param) {
+        Some(Source::Engine(up)) => known_columns(&st, up).into_iter().map(|(c, _)| c).collect(),
+        Some(Source::Local) => n.columns.clone(),
+        None => Vec::new(),
+    };
+    let (rows, note) = match parse_ranges(&value) {
+        Some(rows) => (rows, String::new()),
+        None => (
+            Vec::new(),
+            (!value.trim().is_empty())
+                .then(|| format!("原来的写法读不回来，确定会替换掉它：{}", value.trim()))
+                .unwrap_or_default(),
+        ),
+    };
+    // 下拉里带着位置：选了就知道按第几列算
+    let items: Vec<SharedString> = columns
+        .iter()
+        .enumerate()
+        .map(|(i, name)| SharedString::from(format!("{name}（第 {} 列）", i + 1)))
+        .collect();
+    st.ranges = Some(RangeState { path, node, param, columns, rows });
+    let rp = app.global::<RangePick>();
+    rp.set_title(SharedString::from(title));
+    rp.set_box_x(0.0);
+    rp.set_box_y(0.0);
+    rp.set_columns(ModelRc::new(VecModel::from(items)));
+    rp.set_note(SharedString::from(note));
+    push_ranges(&app, &st);
+    rp.set_open(true);
+}
+
+/// 把状态推给界面（各段、写法）。
+fn push_ranges(app: &AppWindow, st: &App) {
+    let Some(p) = &st.ranges else { return };
+    let rp = app.global::<RangePick>();
+    let rows: Vec<RangeRow> = p
+        .rows
+        .iter()
+        .map(|(a, b)| RangeRow { start: SharedString::from(a.display()), end: SharedString::from(b.display()) })
+        .collect();
+    rp.set_rows(ModelRc::new(VecModel::from(rows)));
+    rp.set_code(SharedString::from(ranges_text(&p.rows)));
+    rp.set_ok_enabled(true);
+}
+
+fn update_ranges(weak: &slint::Weak<AppWindow>, state: &Arc<Mutex<App>>, f: impl FnOnce(&mut RangeState)) {
+    let mut st = state.lock().unwrap();
+    let Some(p) = st.ranges.as_mut() else { return };
+    f(p);
+    if let Some(app) = weak.upgrade() {
+        push_ranges(&app, &st);
+    }
+}
+
+/// 加 / 删一段：推迟到当前回调返回后，不在回调里销毁它旁边的控件。
+fn update_ranges_later(weak: &slint::Weak<AppWindow>, state: &Arc<Mutex<App>>, f: impl FnOnce(&mut RangeState) + Send + 'static) {
+    let (weak, state) = (weak.clone(), state.clone());
+    let _ = slint::invoke_from_event_loop(move || update_ranges(&weak, &state, f));
+}
+
+fn close_ranges(weak: &slint::Weak<AppWindow>, state: &Arc<Mutex<App>>) {
+    state.lock().unwrap().ranges = None;
+    if let Some(app) = weak.upgrade() {
+        app.global::<RangePick>().set_open(false);
+    }
+}
+
+/// 确定：写进参数，重新运行。
+fn accept_ranges(weak: &slint::Weak<AppWindow>, state: &Arc<Mutex<App>>) {
+    {
+        let mut st = state.lock().unwrap();
+        let Some(p) = st.ranges.take() else { return };
+        let output = ranges_text(&p.rows);
+        let Some(node) = st.graph_at_mut(&p.path).and_then(|g| g.node_mut(p.node)) else { return };
+        match node.params.get_mut(p.param) {
+            Some(value) => *value = output,
+            None => return,
+        }
+        clear_node_error(&mut st, p.node);
+    }
+    close_ranges(weak, state);
+    // 参数框要换成新的写法：重建参数面板
+    let (weak, state) = (weak.clone(), state.clone());
+    let _ = slint::invoke_from_event_loop(move || graph_changed(&weak, &state, true));
 }
 
 /// 测试用：每种选择器写一条（参数都填上），引擎测试拿去给 polars 认。
@@ -1976,6 +2291,30 @@ pub(crate) fn every_selector(names: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn range_text_roundtrip() {
+        let rows = vec![
+            (RangeSide::Num(1), RangeSide::Num(3)),
+            (RangeSide::Name("ts".into()), RangeSide::Name("收入".into())),
+            (RangeSide::Open, RangeSide::Num(5)),
+            (RangeSide::Name("a,b".into()), RangeSide::Name("3".into())),
+            (RangeSide::Num(2), RangeSide::Open),
+        ];
+        let text = ranges_text(&rows);
+        assert_eq!(text, "1:3, ts:收入, :5, \"a,b\":\"3\", 2:");
+        // 写出去的读回来还是原来那段；再写一遍文字不变
+        assert_eq!(parse_ranges(&text).unwrap(), rows);
+        assert_eq!(ranges_text(&parse_ranges(&text).unwrap()), text);
+        // 带引号转义的列名也一样
+        let tricky = vec![(RangeSide::Name("a\"b".into()), RangeSide::Name("x:y".into()))];
+        let text = ranges_text(&tricky);
+        assert_eq!(parse_ranges(&text).unwrap(), tricky);
+        // 读不回来的写法是 None（确定会替换）
+        assert_eq!(parse_ranges("1:2, oops"), None);
+        assert_eq!(parse_ranges("1:2,"), None);
+        assert_eq!(parse_ranges(""), Some(vec![]));
+    }
 
     fn state(mode: Pick, insert: ColInsert) -> PickState {
         PickState {

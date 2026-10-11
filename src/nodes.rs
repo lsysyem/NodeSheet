@@ -148,6 +148,8 @@ pub enum Pick {
     Names,
     /// 只要一列（transpose 的 column_names…），点一下就填好
     One,
+    /// 按位置的范围（select 的“按位置”）：范围编辑器，一段段“起:止”
+    Ranges,
     /// 没有选列按钮
     Off,
 }
@@ -156,6 +158,7 @@ pub const PICKS: &[(Pick, &str, &str)] = &[
     (Pick::Select, "select", "列名或选择器"),
     (Pick::Names, "names", "只要列名"),
     (Pick::One, "one", "只要一列"),
+    (Pick::Ranges, "ranges", "按位置的范围"),
     (Pick::Off, "off", "不选列"),
 ];
 
@@ -226,6 +229,9 @@ impl ParamDef {
     /// 选列框怎么选：没写时按类型——列名（多个）、表达式可以用选择器，只插列名的表达式参数（transpose 的
     /// column_names）只要一列，键值对的键只要列名；表达式级节点的端口连线就行，不弹。
     pub fn pick(&self) -> Pick {
+        if self.pick == Some(Pick::Ranges) {
+            return Pick::Ranges;
+        }
         if self.port || self.insert() == ColInsert::None {
             return Pick::Off;
         }

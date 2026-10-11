@@ -1549,7 +1549,11 @@ pub mod tests {
     fn compile_orders_upstream_first_and_checks_params() {
         let mut g = Graph::for_file(Path::new("a.csv"), "");
         let f = g.add(&kind("select"));
-        assert_eq!(g.compile(f).unwrap_err().node, f); // 列没填
+        // select 的列和范围可以都空（运行时才报没有选到列）；必填的参数没填编译不过（rename 的对照表）
+        assert!(g.compile(f).is_ok());
+        let r = g.add(&kind("rename"));
+        assert_eq!(g.compile(r).unwrap_err().node, r);
+        g.remove(r); // 别挡在后面的链上
         assert!(g.node_mut(f).unwrap().set("columns", "\"a\""));
         let h = g.add(&kind("slice"));
         let steps = g.compile(h).unwrap();
@@ -1558,6 +1562,7 @@ pub mod tests {
         assert_eq!(steps[1].params.iter().map(|p| (p.name.as_str(), p.kind, p.value.as_str())).collect::<Vec<_>>(), [
             ("mode", "menu", "select"),
             ("columns", "columns", "\"a\""),
+            ("ranges", "text", ""),
         ]);
         // 不去空白的文本参数传 raw；不显示的参数传默认值
         assert_eq!(steps[0].params.iter().find(|p| p.name == "separator").unwrap().kind, "raw");
@@ -1639,8 +1644,7 @@ pub mod tests {
         let (l, t, r, b) = g.bounds_of(None).unwrap();
         assert_eq!((l, t), (n0.x.min(n1.x), n0.y.min(n1.y)));
         assert!(r >= n1.x + NODE_W + LABEL_W && b == n0.y.max(n1.y) + NODE_H);
-        // 脚本：每个节点一段，输入按名字引用；没填条件时导不出
-        assert!(g.python_script(f, "def run_code(): pass").is_err());
+        // 脚本：每个节点一段，输入按名字引用（必填没填的导不出，rename 的用例在上面）
         g.node_mut(f).unwrap().set("columns", "\"a\"");
         let script = g.python_script(f, "def run_code(): pass").unwrap();
         assert!(script.contains("def run_code(): pass"));

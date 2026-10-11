@@ -1249,17 +1249,21 @@ out = frame.select(ch("cols")).rename(ch("names")).with_row_index(**ch("opts")).
         // ---- 列
         c.case(all, all, "select", &[("columns", "\"k\", cs.numeric()")]);
         c.case(all, all, "select", &[("mode", "drop"), ("columns", "\"l\", \"st\"")]);
-        // 按位置选：序号范围（1 起、含两端）、名字范围、Excel 列标、单独一个序号
-        let ranged = c.add(all, all, "select", &[("columns", "\"1:3\", \"i:ts\", \"10:12\"")]);
-        if c.run(ranged, "select 序号 / 名字范围").is_ok() {
+        // 按位置的范围参数：“起:止”（1 起、含两端），列名按当时的位置算，倒着写会调换；和列或表达式合在一起
+        let ranged = c.add(all, all, "select", &[("ranges", "1:3, i:ts, 10:12")]);
+        if c.run(ranged, "select 范围").is_ok() {
             assert_eq!(loader::open_tables(&c.out).unwrap()[0].source.headers(),
                 ["k", "s", "n", "i", "t", "l", "a", "ts", "c", "b", "mp"]);
         }
-        let ranged = c.add(all, all, "select", &[("columns", "\"a:c\", 4")]);
-        if c.run(ranged, "select 列标 / 单独序号").is_ok() {
-            assert_eq!(loader::open_tables(&c.out).unwrap()[0].source.headers(), ["k", "s", "n", "i"]);
+        let ranged = c.add(all, all, "select", &[("ranges", "\"ts\":\"i\"")]);
+        if c.run(ranged, "select 范围倒着写").is_ok() {
+            assert_eq!(loader::open_tables(&c.out).unwrap()[0].source.headers(), ["i", "t", "l", "a", "ts"]);
         }
-        let ranged = c.add(all, all, "select", &[("mode", "drop"), ("columns", "\"a:b\", 3")]);
+        let ranged = c.add(all, all, "select", &[("columns", "\"st\""), ("ranges", "1:2")]);
+        if c.run(ranged, "select 列名 + 范围").is_ok() {
+            assert_eq!(loader::open_tables(&c.out).unwrap()[0].source.headers(), ["st", "k", "s"]);
+        }
+        let ranged = c.add(all, all, "select", &[("mode", "drop"), ("ranges", "1:3")]);
         if c.run(ranged, "drop 范围").is_ok() {
             assert_eq!(loader::open_tables(&c.out).unwrap()[0].source.headers(),
                 ["i", "t", "l", "a", "ts", "st", "c", "b", "mp"]);
