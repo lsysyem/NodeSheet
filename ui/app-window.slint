@@ -1,0 +1,1343 @@
+// 主窗口：菜单栏 + 工具架 + 主区域（表格面板、节点面板，中间的缝可拖动）+ 状态栏 + 浮层（右键菜单、代码补全）。
+// 界面的全部状态声明在这里，Rust 只和这个组件打交道；两个面板是各自文件里的组件。
+import { ListView, Palette, Button, LineEdit, ComboBox } from "std-widgets.slint";
+import { Theme, ColumnSpec, RowData, NodeItem, WireItem, CompletionItem, CodeEdit, ParamItem, KindItem, PortItem, HelpBlock, RecentItem } from "theme.slint";
+import { Card, MenuRow, CheckBox } from "widgets.slint";
+import { TablePanel } from "table-panel.slint";
+import { NodePanel } from "node-panel.slint";
+import { Shelf } from "shelf.slint";
+import { HelpWindow } from "help.slint";
+import { MenuTitle, MenuEntry, MenuSeparator2, MenuPanel } from "menubar.slint";
+import { TypeEditor, TypeEdit, EdParam, EdDetail, EdType, EdSource, EdRef } from "type-editor.slint";
+import { PickPopup, ColPick, PickCol, PickRow } from "pick.slint";
+export { ColumnSpec, RowData, NodeItem, WireItem, CompletionItem, CodeEdit, ParamItem, KindItem, PortItem, HelpBlock, RecentItem }
+export { TypeEdit, EdParam, EdDetail, EdType, EdSource, EdRef }
+export { ColPick, PickCol, PickRow }
+
+export component AppWindow inherits Window {
+    title: (root.modified ? "● " : "") + (root.project-name == "" ? "" : root.project-name + " · ")
+        + (root.file-name == "" || root.file-name == "未打开文件" ? "NodeSheet" : root.file-name + " — NodeSheet");
+    preferred-width: 1152px;
+    preferred-height: 720px;
+    min-width: 560px;
+    min-height: 360px;
+    background: Theme.bg;
+    icon: @image-url("../assets/icon.png");
+    default-font-family: "Microsoft YaHei UI";
+
+    // ---------------- 数据属性 ----------------
+    in property <string> file-name: "未打开文件";
+    in property <string> project-name;       // 工程文件名，空 = 还没存成工程
+    in property <bool> modified;             // 节点图改过了还没存（标题前写 ●）
+    callback undo(bool);                     // 节点图撤销；true = 重做
+    in property <[RecentItem]> recent-files; // “文件”菜单里最近打开的
+    callback open-recent(int);
+    callback reload-file();                  // 数据文件重新读一遍（节点图照旧）
+    in property <string> file-meta;          // 格式 · 大小
+    in property <string> status: "拖放文件到窗口，或按 Ctrl+O 打开";
+    in property <string> stats;              // 行×列
+    // 表格面板的路径栏 / Python 脚本页
+    in-out property <int> view-tab: 0;       // 0 表格 / 1 Python 脚本 / 2 查询计划
+    in property <string> view-title;         // 显示节点的名字
+    in property <string> view-summary;       // 显示节点的摘要
+    in property <string> view-time;          // 这次运行用了多久
+    in property <string> script-text;
+    in property <[string]> script-layers;
+    callback show-script();                  // 切到 Python 脚本页：生成脚本
+    in property <string> plan-text;
+    in property <[string]> plan-layers;
+    in-out property <bool> plan-tree: false;
+    callback show-plan();                    // 切到查询计划页 / 换画法：向引擎要 explain
+    callback copy-text(string);              // 复制到剪贴板
+    callback save-script();
+    in property <bool> busy: false;          // 解码中 / 节点运行中
+    in property <[RowData]> rows;
+    in-out property <[ColumnSpec]> columns;
+    in property <length> gutter-width: 44px; // 行号列宽度
+
+    // ---------------- 选择：一块矩形（起点格 → 终点格），或者整行 / 整列 ----------------
+    in-out property <bool> sel-active: false;
+    in-out property <int> sel-r0;            // 起点（按住 Shift 再点时不动）
+    in-out property <int> sel-c0;
+    in-out property <int> sel-r1;            // 终点（拖到哪）
+    in-out property <int> sel-c1;
+    in-out property <bool> sel-rows: false;  // 整行：列不限
+    in-out property <bool> sel-cols: false;  // 整列：行不限
+    // Ctrl 加选不连续的行 / 列：块在 Rust 侧（见 selection.rs）；sel-gen 新选择 +1（块作废），sel-epoch 块变了 Rust +1
+    in-out property <int> sel-gen: 0;
+    in-out property <int> sel-epoch: 0;
+    pure callback row-extra(int) -> bool;
+    pure callback col-extra(int) -> bool;
+    pure callback cell-extra-top(int, int) -> bool;   // 格子在加选块的外沿（描边用）
+    pure callback cell-extra-bottom(int, int) -> bool;
+    pure callback cell-extra-left(int, int) -> bool;
+    pure callback cell-extra-right(int, int) -> bool;
+    pure callback has-extra-cols() -> bool;
+    pure callback sel-info-text() -> string; // “已选 N 行 × M 列”，含加选块
+    callback ctrl-pick-row(int);
+    callback ctrl-drag-row-to(int);
+    callback ctrl-pick-col(int);
+    callback ctrl-drag-col-to(int);
+    property <int> focus-area: 0;            // 键盘归谁：1 表格（Ctrl+C / Ctrl+A）/ 2 节点画布（Delete / Tab）
+    property <bool> ctx-visible: false;      // 表格的右键菜单
+    property <length> ctx-x;
+    property <length> ctx-y;
+    property <int> ctx-row: -1;              // 右键点的格子：表头行是 -1，行号列是 -1
+    property <int> ctx-col: -1;
+    // 表格右键菜单里建节点的快捷操作：sort-asc / sort-desc / count / drop / keep（表头）、only / remove（格子）
+    callback quick-action(string, int, int);
+    property <string> sel-info: root.sel-epoch >= 0 && root.sel-gen >= 0 ? root.sel-info-text() : "";
+    pure callback col-at(length) -> int;     // 表格内容坐标 x 落在第几列
+    callback copy-selection(bool);           // 复制选中的格子；true = 带表头
+
+    function select-all() {
+        root.sel-rows = true;
+        root.sel-cols = true;
+        root.sel-active = true;
+    }
+    function focus-table() {
+        root.focus-area = 1;
+        root.ctx-visible = false;
+        key-scope.focus();
+    }
+    // x / y：窗口里的绝对位置
+    function open-context-menu(x: length, y: length) {
+        root.ctx-x = x - key-scope.absolute-position.x;
+        root.ctx-y = y - key-scope.absolute-position.y;
+        root.ctx-visible = true;
+    }
+    in property <bool> drag-hover: false;
+    in property <int> theme-mode: 0;         // 0 跟随系统 / 1 浅色 / 2 深色
+
+    in property <bool> settings-wrap: false; // 单元格自动换行
+    // 设置 → 显示格式（照 polars 的显示项 pl.Config）：对话框开着时编辑的值，“确定”才应用
+    in-out property <bool> fmt-visible: false;
+    in-out property <int> fmt-float-mode: 0;      // 0 智能 / 1 完整 / 2 固定小数位
+    in-out property <string> fmt-float-digits: "2";
+    in-out property <bool> fmt-thousands: false;
+    in-out property <bool> fmt-trim: false;
+    in-out property <string> fmt-max-cell: "500";
+    in-out property <string> fmt-null: "null";
+    callback show-display-fmt();                  // 打开对话框：Rust 把当前值推进来
+    callback apply-display-fmt();                 // “确定”：应用并存盘、刷新表格
+    in-out property <length> table-font-size: 13px; // 表格字号，行高随之变化
+    out property <length> row-h: root.table-font-size + 15px;
+    // 表格区在窗口里的位置和大小（表格面板报上来的）：Rust 判断 Ctrl + 滚轮落在不在表格上
+    out property <length> table-x;
+    out property <length> table-y;
+    out property <length> table-w;
+    out property <length> table-h;
+    pure callback table-zoom-pct() -> int;   // 当前缩放百分比（13px = 100%）
+    callback reset-zoom();
+
+    // ---------------- 节点图 ----------------
+    in-out property <bool> node-panel-visible: true;
+    // 画布在窗口里的位置和大小（节点面板报上来的；面板关着时宽是 0）：Rust 判断拖进来的文件落在不在画布上
+    out property <length> canvas-x;
+    out property <length> canvas-y;
+    out property <length> canvas-w;
+    out property <length> canvas-h;
+    changed node-panel-visible => {
+        if (!self.node-panel-visible) {
+            self.canvas-w = 0px;
+        }
+    }
+    in-out property <length> node-panel-width: 460px;
+    in-out property <int> shelf-cat: 0;       // 工具架当前的分类页签
+    in-out property <length> params-height: 320px;   // 参数区高度（可拖动）
+    in-out property <bool> swap-main: false;   // 表格和节点面板左右互换（默认表格在左）
+    in-out property <bool> swap-node: false;   // 节点图和参数上下互换（默认参数在上）
+    in-out property <float> zoom: 1.0;         // 画布缩放
+    property <float> zoom-prev: 1.0;
+    in-out property <[NodeItem]> nodes;
+    in property <[WireItem]> wires;
+    in property <[KindItem]> node-kinds;
+    in property <[ParamItem]> node-params;   // 选中节点的参数
+    in property <string> node-title;          // 选中节点的名字，空 = 没有选中
+    in property <string> node-desc;
+    in property <string> node-kind;           // 选中节点的类型名
+    in property <string> node-source;         // 选中节点定义的来源标签（用户 / 工程 / 已改内置 / 私有参数），内置的是空
+    in property <[string]> node-cats;         // “添加”菜单的分类
+    in property <int> node-cat;               // 选中节点的分类
+    in property <string> node-code;           // 选中节点的代码
+    in property <string> node-code-head;      // 代码预览收起时显示的一行
+    in-out property <int> add-cat: 0;         // “添加”菜单当前展开的分类
+    in property <[int]> node-cat-icons;       // “添加”菜单各分类的图标
+    in property <[KindItem]> shelf-kinds;     // 工具架：总是表格级的节点
+    in property <[string]> shelf-cats;
+    // 表达式网络（进到 expr 节点里面时）
+    in property <bool> vop;                   // 画布上是表达式网络
+    in-out property <[PortItem]> vop-ports;   // 表达式节点的输入端口（一行一个）
+    in property <[string]> net-crumbs;        // 一路进来的节点名（expr1、eval1…）
+    in property <string> net-context;         // 它的上下文
+    in property <[string]> net-envs;          // group_by 的 expr 节点里：几张网络的页签
+    in property <int> net-env;                // 正看着第几张
+    in property <string> net-hint;            // 网络是空的时候画布上的提示
+    in property <bool> node-vop;              // 选中的是表达式节点
+    in property <bool> node-net;              // 选中的节点里面有表达式网络
+    in-out property <int> fit-request;        // 加一 = 节点图摆到能看见全部节点
+    in property <string> node-error;
+    in property <string> node-warn;
+    in property <string> node-output;         // 代码里 print 的内容
+    in property <bool> node-running;
+    property <int> connect-from: -1;          // 正在连线：已点了哪个节点的输出端口
+    property <bool> drag-active: false;       // 正在拖线
+    property <int> drag-node: 0;              // 从哪个节点拖出来的
+    property <int> drag-slot: -1;             // -1 = 从输出端口拖；否则是从第几个输入往回拖
+    property <length> drag-x;                 // 拖到哪了（画布上的像素位置）
+    property <length> drag-y;
+    in property <bool> wire-selected;         // 有选中的连线
+    in property <[string]> code-layers;       // 代码编辑框的高亮层
+    in property <string> code-hint;           // 光标所在调用的签名
+    in-out property <[CompletionItem]> ac-items; // 代码补全列表，空 = 不显示
+    in-out property <int> ac-index;
+    property <int> ac-picked: -1;
+    property <length> ac-x;
+    property <length> ac-y;
+    property <bool> add-menu-visible: false;
+    // Tab 菜单：在画布上按 Tab，在鼠标处搜节点
+    property <bool> search-visible: false;
+    in property <[KindItem]> search-results;  // 名字可能带方式：slice · tail
+    property <int> search-index;
+    property <length> hover-x;                // 鼠标在画布上的位置（像素）
+    property <length> hover-y;
+    property <length> search-cx;              // 新节点放在哪（画布坐标）
+    property <length> search-cy;
+    in-out property <length> pan-x: 0px;
+    in-out property <length> pan-y: 0px;
+
+    callback add-node(int);                 // 节点种类下标
+    callback search-nodes(string);          // Tab 菜单里输入了什么：刷新 search-results
+    callback add-found(int, length, length); // 添加第几条搜索结果，放在画布的哪个位置
+    // 画布上的鼠标（照 Houdini）：点选 / Shift 加选 / Ctrl 减选、拖动（Shift 连同上游、Ctrl 连同下游、Alt 复制）、框选
+    callback node-press(int, bool, bool, bool, length, length); // 按下节点：下标, Shift, Ctrl, Alt, 鼠标的画布坐标
+    callback node-drag(length, length);                         // 拖着节点：鼠标的画布坐标
+    callback node-release();                                    // 松开节点
+    callback box-select(length, length, length, length, int);   // 框选：两个角（画布坐标）, 0 换 / 1 加 / 2 减
+    callback cut-point(length, length);     // 按着 Y 拖：轨迹上的一点（画布坐标）
+    callback cut-end();                     // 松手：剪断和轨迹相交的连线
+    callback net-command(string, length, length); // 快捷键 / 右键菜单的命令, 鼠标的画布坐标（粘贴到那里）
+    in-out property <bool> space-down;      // 按着空格：左键拖 = 平移
+    in-out property <bool> cut-mode;        // 按着 Y：左键拖 = 剪线
+    in-out property <string> cut-trail;     // 剪线的轨迹（画布上的像素，Path 的命令）
+    in-out property <bool> fit-selected;    // fit-request 要的是看选中的（G）还是全部（H）
+    callback set-display(int);
+    callback toggle-bypass(int);
+    callback connect-nodes(int, int, int);  // 源节点, 目标节点, 输入槽
+    callback disconnect-input(int, int);
+    callback wire-dropped(int, int, length, length);  // 拖线松手：起点节点, 起点输入槽（-1 = 输出端口）, 画布坐标
+    callback canvas-clicked(length, length, length, bool);  // 点画布空白处：画布坐标, 容差（选连线）, 只选连线不动节点（右键）
+    callback delete-selection();                      // Delete：删选中的连线，没有则删选中的节点
+    callback code-edited(int, string, int);           // 参数下标, 文本, 光标
+    callback code-accept(string, int, int) -> CodeEdit;
+    callback code-key(string, int, int, string) -> CodeEdit;
+    callback param-edited(int, string);     // 正在输入：只记下，不运行
+    callback param-accepted(int);           // 回车：运行
+    callback param-toggled(int, bool);      // 开关
+    callback param-picked(int, int);        // 下拉：参数下标, 选项下标
+    callback param-browse(int);             // 选文件
+    callback param-action(int);             // 按钮（写出）
+    callback run-graph();
+    callback stop-graph();
+    callback rename-node(string);           // 改选中节点的名字
+    callback fit-view(length, length, bool); // 节点图“适应”：画布宽高, 只看选中的
+    callback shelf-add(int);                // 工具架上的第几种节点
+    callback enter-node(int);               // 进到 expr 节点里面（-1 = 选中的）
+    callback go-up();                       // 回到上一级
+    callback go-top();                      // 一直回到表格级
+    callback go-level(int);                 // 回到第几级（1 = 最外面那个 expr 节点里面）
+    callback pick-env(int);                 // 换到 expr 节点里的第几张网络（group_by：分组键 / 聚合 / 筛选组）
+    callback text-action();                 // 参数面板的“转成文字 / 展开成节点”
+    in property <string> node-code-label: "代码";
+    in property <int> node-text-action;
+    callback request-fit();                 // Rust 要求摆好画布
+
+    // ---------------- 帮助窗口 ----------------
+    in-out property <bool> help-visible: false;
+    in property <string> help-title;          // 类型名
+    in property <string> help-desc;
+    in property <string> help-category;       // 表格节点 · 行
+    in property <int> help-cat;
+    in property <string> help-badge;
+    in property <[HelpBlock]> help-blocks;
+    in property <bool> help-can-back;
+    in property <int> help-page;              // 换了一页：滚回开头
+    property <length> help-x: -1px;           // 窗口里的位置；负数 = 还没放过（靠右放）
+    property <length> help-y: 64px;
+    property <length> help-w: 540px;
+    property <length> help-h: 620px;
+    callback node-info(int) -> string;        // 中键按住画布上的节点：它的信息（下标）
+    callback kind-help(int, int);             // 中键点了菜单里的节点种类：0 Tab 搜索 / 1 添加菜单 / 2 工具架, 下标
+    callback selected-help();                 // F1 / 参数面板的“?”：参数面板正编辑的节点
+    callback help-link(string);               // 点了帮助里的相关节点
+    callback help-back();
+
+    // 中键点的地方（窗口坐标）：帮助窗口没开着时放在旁边
+    function place-help(x: length, y: length) {
+        if (!root.help-visible) {
+            root.help-x = x - key-scope.absolute-position.x + 24px;
+            root.help-y = y - key-scope.absolute-position.y - 40px;
+        }
+    }
+
+    request-fit => { root.fit-request += 1; }
+
+    function open-search() {
+        root.search-cx = (root.hover-x - root.pan-x) / root.zoom - 98px;
+        root.search-cy = (root.hover-y - root.pan-y) / root.zoom - 29px;
+        root.search-index = 0;
+        root.search-nodes("");
+        root.add-menu-visible = false;
+        root.search-visible = true;
+    }
+    function close-search() {
+        root.search-visible = false;
+        root.focus-area = 2;
+        key-scope.focus();
+    }
+    function pick-found(i: int) {
+        root.close-search();
+        root.add-found(i, root.search-cx, root.search-cy);
+    }
+
+    // ---------------- 回调 ----------------
+    callback open-file();
+    callback save-project(bool);  // 保存工程（节点图 + 界面）；true = 另存为
+    callback quit();
+    callback toggle-wrap();
+    callback set-theme(int);
+    callback autofit-columns();   // 列宽重新按内容自适应
+
+    // 实际是不是深色（跟随系统时看系统）：窗口标题栏跟着变
+    out property <bool> is-dark: Theme.dark;
+    callback dark-changed(bool);
+    changed is-dark => { root.dark-changed(self.is-dark); }
+
+    changed theme-mode => {
+        Palette.color-scheme = root.theme-mode == 1 ? ColorScheme.light
+            : (root.theme-mode == 2 ? ColorScheme.dark : ColorScheme.unknown);
+    }
+
+    // ---------------- 主区域 ----------------
+    key-scope := FocusScope {
+        key-pressed(event) => {
+            // 菜单的快捷键（输入框里没用掉的按键会冒泡到这里）
+            if (event.modifiers.control && !event.modifiers.alt) {
+                if (event.text == "o" || event.text == "O") {
+                    root.open-file();
+                    return accept;
+                }
+                if (event.text == "s" || event.text == "S") {
+                    root.save-project(event.modifiers.shift);
+                    return accept;
+                }
+                if (event.text == "e" || event.text == "E") {
+                    root.node-panel-visible = !root.node-panel-visible;
+                    return accept;
+                }
+                if (event.text == "r" || event.text == "R") {
+                    root.reload-file();
+                    return accept;
+                }
+                // 表格缩放重置（Ctrl + 滚轮缩放）
+                if (event.text == "0") {
+                    root.reset-zoom();
+                    return accept;
+                }
+                // 节点图的撤销 / 重做（输入框里的 Ctrl+Z 输入框自己先用掉，撤销的是文字）
+                if (event.text == "z" || event.text == "Z") {
+                    root.undo(event.modifiers.shift);
+                    return accept;
+                }
+                if (event.text == "y" || event.text == "Y") {
+                    root.undo(true);
+                    return accept;
+                }
+            }
+            if (event.text == Key.F5) {
+                root.run-graph();
+                return accept;
+            }
+            // F1：帮助（Tab 菜单开着时是选中的那一项）
+            if (event.text == Key.F1) {
+                if (root.search-visible) {
+                    root.kind-help(0, root.search-index);
+                } else {
+                    root.selected-help();
+                }
+                return accept;
+            }
+            if (event.text == Key.Escape && root.help-visible) {
+                root.help-visible = false;
+                return accept;
+            }
+            if (event.text == Key.Escape && root.fmt-visible) {
+                root.fmt-visible = false;
+                return accept;
+            }
+            if (event.text == Key.Escape) {
+                if (root.add-menu-visible || root.connect-from >= 0) {
+                    root.add-menu-visible = false;
+                    root.connect-from = -1;
+                    return accept;
+                }
+            }
+            // 最后点的是表格：复制 / 全选 / 取消选择
+            if (root.focus-area == 1) {
+                if (event.modifiers.control && (event.text == "c" || event.text == "C")) {
+                    root.copy-selection(event.modifiers.shift);
+                    return accept;
+                }
+                if (event.modifiers.control && (event.text == "a" || event.text == "A")) {
+                    root.select-all();
+                    return accept;
+                }
+                if (event.text == Key.Escape && (root.sel-active || root.ctx-visible)) {
+                    root.sel-active = false;
+                    root.sel-gen += 1;
+                    root.ctx-visible = false;
+                    return accept;
+                }
+            }
+            // 最后点的是画布（节点 / 连线 / 空白处）：Tab 搜节点，Delete 删除选中的连线或节点
+            if (root.focus-area == 2 && root.node-panel-visible) {
+                if (event.text == Key.Tab) {
+                    root.open-search();
+                    return accept;
+                }
+                if (event.text == Key.Delete || event.text == Key.Backspace) {
+                    root.delete-selection();
+                    return accept;
+                }
+                // 回车 / I 进到选中节点里面的网络，U 回到上一级（Houdini 的 i / u）
+                if ((event.text == Key.Return || event.text == "i" || event.text == "I") && !event.modifiers.control) {
+                    root.enter-node(-1);
+                    return accept;
+                }
+                if ((event.text == "u" || event.text == "U") && root.vop && !event.modifiers.control) {
+                    root.go-up();
+                    return accept;
+                }
+                // Ctrl+C / X / V / A：复制 / 剪切 / 粘贴（到鼠标处）/ 全选节点
+                if (event.modifiers.control && !event.modifiers.alt) {
+                    if (event.text == "c" || event.text == "C") {
+                        root.net-command("copy", 0, 0);
+                        return accept;
+                    }
+                    if (event.text == "x" || event.text == "X") {
+                        root.net-command("cut", 0, 0);
+                        return accept;
+                    }
+                    if (event.text == "v" || event.text == "V") {
+                        root.net-command("paste", (root.hover-x - root.pan-x) / root.zoom, (root.hover-y - root.pan-y) / root.zoom);
+                        return accept;
+                    }
+                    if (event.text == "a" || event.text == "A") {
+                        root.net-command("select-all", 0, 0);
+                        return accept;
+                    }
+                    reject
+                }
+                // H 看全部、G 看选中的
+                if (event.text == "h" || event.text == "H" || event.text == "g" || event.text == "G") {
+                    root.fit-selected = event.text == "g" || event.text == "G";
+                    root.fit-request += 1;
+                    return accept;
+                }
+                // Q / B 旁路，R 显示，L 排列，PgUp / PgDn 沿着链选上下游
+                if (event.text == "q" || event.text == "Q" || event.text == "b" || event.text == "B") {
+                    root.net-command("bypass", 0, 0);
+                    return accept;
+                }
+                if (event.text == "r" || event.text == "R") {
+                    root.net-command("display", 0, 0);
+                    return accept;
+                }
+                if (event.text == "l" || event.text == "L") {
+                    root.net-command("layout", 0, 0);
+                    return accept;
+                }
+                if (event.text == Key.PageUp || event.text == Key.PageDown) {
+                    root.net-command(event.text == Key.PageUp ? "up" : "down", 0, 0);
+                    return accept;
+                }
+                // 按着空格：左键拖平移；按着 Y：左键拖剪线
+                if (event.text == " ") {
+                    root.space-down = true;
+                    return accept;
+                }
+                if (event.text == "y" || event.text == "Y") {
+                    root.cut-mode = true;
+                    return accept;
+                }
+            }
+            reject
+        }
+        key-released(event) => {
+            if (event.text == " " && root.space-down) {
+                root.space-down = false;
+                return accept;
+            }
+            if ((event.text == "y" || event.text == "Y") && root.cut-mode) {
+                root.cut-mode = false;
+                // 还没松鼠标就松了 Y：照样剪
+                if (root.cut-trail != "") {
+                    root.cut-trail = "";
+                    root.cut-end();
+                }
+                return accept;
+            }
+            reject
+        }
+        changed has-focus => {
+            if (!self.has-focus) {
+                root.space-down = false;
+                root.cut-mode = false;
+            }
+        }
+
+        VerticalLayout {
+            spacing: 0px;
+
+            // ---------------- 菜单栏：自己画的，跟着主题变深浅 ----------------
+            menubar := Rectangle {
+                height: 28px;
+                background: Theme.surface-alt;
+
+                HorizontalLayout {
+                    padding-left: 4px;
+                    padding-top: 3px;
+                    padding-bottom: 3px;
+                    alignment: start;
+                    spacing: 1px;
+                    file-title := MenuTitle {
+                        text: "文件";
+                        clicked => { file-menu.show(); }
+                    }
+                    node-title-m := MenuTitle {
+                        text: "节点";
+                        clicked => { node-menu.show(); }
+                    }
+                    set-title := MenuTitle {
+                        text: "设置";
+                        clicked => { set-menu.show(); }
+                    }
+                }
+
+                file-menu := PopupWindow {
+                    x: file-title.x;
+                    y: parent.height - 2px;
+                    width: 320px;
+                    MenuPanel {
+                        MenuEntry {
+                            label: "打开…";
+                            keys: "Ctrl+O";
+                            activated => { file-menu.close(); root.open-file(); }
+                        }
+                        MenuEntry {
+                            label: "重新加载";
+                            keys: "Ctrl+R";
+                            activated => { file-menu.close(); root.reload-file(); }
+                        }
+                        MenuEntry {
+                            label: "保存";
+                            keys: "Ctrl+S";
+                            activated => { file-menu.close(); root.save-project(false); }
+                        }
+                        MenuEntry {
+                            label: "另存为…";
+                            keys: "Ctrl+Shift+S";
+                            activated => { file-menu.close(); root.save-project(true); }
+                        }
+                        // 最近打开的：文件名，右边淡色写在哪个文件夹
+                        if root.recent-files.length > 0: VerticalLayout {
+                            MenuSeparator2 {}
+                            for item[i] in root.recent-files: MenuEntry {
+                                label: item.name;
+                                keys: item.folder;
+                                activated => { file-menu.close(); root.open-recent(i); }
+                            }
+                        }
+                        MenuSeparator2 {}
+                        MenuEntry {
+                            label: "退出";
+                            keys: "Alt+F4";
+                            activated => { file-menu.close(); root.quit(); }
+                        }
+                    }
+                }
+
+                node-menu := PopupWindow {
+                    x: node-title-m.x;
+                    y: parent.height - 2px;
+                    width: 260px;
+                    MenuPanel {
+                        MenuEntry {
+                            label: "节点面板";
+                            keys: "Ctrl+E";
+                            checked: root.node-panel-visible;
+                            activated => { node-menu.close(); root.node-panel-visible = !root.node-panel-visible; }
+                        }
+                        MenuSeparator2 {}
+                        MenuEntry {
+                            label: "撤销";
+                            keys: "Ctrl+Z";
+                            activated => { node-menu.close(); root.undo(false); }
+                        }
+                        MenuEntry {
+                            label: "重做";
+                            keys: "Ctrl+Y";
+                            activated => { node-menu.close(); root.undo(true); }
+                        }
+                        MenuSeparator2 {}
+                        MenuEntry {
+                            label: "运行";
+                            keys: "F5";
+                            activated => { node-menu.close(); root.run-graph(); }
+                        }
+                        MenuEntry {
+                            label: "停止";
+                            activated => { node-menu.close(); root.stop-graph(); }
+                        }
+                        MenuSeparator2 {}
+                        MenuEntry {
+                            label: "选中节点的帮助";
+                            keys: "F1";
+                            activated => { node-menu.close(); root.selected-help(); }
+                        }
+                        MenuSeparator2 {}
+                        MenuEntry {
+                            label: "编辑选中节点的类型…";
+                            activated => { node-menu.close(); TypeEdit.edit-node(); }
+                        }
+                        MenuEntry {
+                            label: "新建节点类型…";
+                            activated => { node-menu.close(); TypeEdit.new-type(); }
+                        }
+                        MenuEntry {
+                            label: "打开自定义节点文件夹";
+                            activated => { node-menu.close(); TypeEdit.open-folder(); }
+                        }
+                        MenuEntry {
+                            label: "重新加载节点类型";
+                            activated => { node-menu.close(); TypeEdit.reload-types(); }
+                        }
+                    }
+                }
+
+                set-menu := PopupWindow {
+                    x: set-title.x;
+                    y: parent.height - 2px;
+                    width: 260px;
+                    MenuPanel {
+                        MenuEntry {
+                            label: "单元格自动换行";
+                            checked: root.settings-wrap;
+                            activated => { set-menu.close(); root.toggle-wrap(); }
+                        }
+                        MenuEntry {
+                            label: "自动列宽";
+                            activated => { set-menu.close(); root.autofit-columns(); }
+                        }
+                        MenuEntry {
+                            label: "显示格式…";
+                            activated => { set-menu.close(); root.show-display-fmt(); }
+                        }
+                        MenuEntry {
+                            label: "表格缩放：" + root.table-zoom-pct() + "%";
+                            checked: root.table-zoom-pct() == 100;
+                            activated => { set-menu.close(); root.reset-zoom(); }
+                        }
+                        MenuSeparator2 {}
+                        MenuEntry {
+                            label: "表格和节点面板左右互换";
+                            checked: root.swap-main;
+                            activated => { set-menu.close(); root.swap-main = !root.swap-main; }
+                        }
+                        MenuEntry {
+                            label: "节点图和参数上下互换";
+                            checked: root.swap-node;
+                            activated => { set-menu.close(); root.swap-node = !root.swap-node; }
+                        }
+                        MenuSeparator2 {}
+                        MenuEntry {
+                            label: "主题：跟随系统";
+                            checked: root.theme-mode == 0;
+                            activated => { set-menu.close(); root.set-theme(0); }
+                        }
+                        MenuEntry {
+                            label: "主题：浅色";
+                            checked: root.theme-mode == 1;
+                            activated => { set-menu.close(); root.set-theme(1); }
+                        }
+                        MenuEntry {
+                            label: "主题：深色";
+                            checked: root.theme-mode == 2;
+                            activated => { set-menu.close(); root.set-theme(2); }
+                        }
+                    }
+                }
+            }
+
+            // ---------------- 工具架：节点的快捷方式 ----------------
+            if root.node-panel-visible: Shelf {
+                node-cats: root.shelf-cats;
+                node-kinds: root.shelf-kinds;
+                current <=> root.shelf-cat;
+                add-node(k) => { root.shelf-add(k); }
+                kind-help(k, x, y) => { root.place-help(x, y); key-scope.focus(); root.kind-help(2, k); }
+            }
+
+            // ---------------- 表格 + 节点面板 ----------------
+            // 两个面板的位置是自己算的（不用布局排）：这样才能左右互换。面板之间是 4px 的缝
+            main-area := Rectangle {
+                vertical-stretch: 1;
+                property <length> node-w: !root.node-panel-visible ? 0px
+                    : max(260px, min(root.node-panel-width, self.width - 224px));
+                property <length> table-w: self.width - 8px - (root.node-panel-visible ? self.node-w + 4px : 0px);
+                property <bool> swapped: root.swap-main && root.node-panel-visible;
+
+                table-frame := TablePanel {
+                    x: main-area.swapped ? main-area.node-w + 8px : 4px;
+                    y: 4px;
+                    width: main-area.table-w;
+                    height: main-area.height - 8px;
+                    view-tab <=> root.view-tab;
+                    view-title: root.view-title;
+                    view-summary: root.view-summary;
+                    view-stats: root.stats;
+                    view-time: root.view-time;
+                    script-text: root.script-text;
+                    script-layers: root.script-layers;
+                    show-script() => { root.show-script(); }
+                    copy-script() => { root.copy-text(root.script-text); }
+                    save-script() => { root.save-script(); }
+                    plan-text: root.plan-text;
+                    plan-layers: root.plan-layers;
+                    plan-tree <=> root.plan-tree;
+                    show-plan() => { root.show-plan(); }
+                    copy-plan() => { root.copy-text(root.plan-text); }
+                    busy: root.busy;
+                    columns <=> root.columns;
+                    drag-hover: root.drag-hover;
+                    gutter-width: root.gutter-width;
+                    row-h: root.row-h;
+                    rows: root.rows;
+                    sel-active <=> root.sel-active;
+                    sel-c0 <=> root.sel-c0;
+                    sel-c1 <=> root.sel-c1;
+                    sel-cols <=> root.sel-cols;
+                    sel-r0 <=> root.sel-r0;
+                    sel-r1 <=> root.sel-r1;
+                    sel-rows <=> root.sel-rows;
+                    sel-gen <=> root.sel-gen;
+                    sel-epoch <=> root.sel-epoch;
+                    row-extra(r) => { return root.row-extra(r); }
+                    col-extra(c) => { return root.col-extra(c); }
+                    cell-extra-top(r, c) => { return root.cell-extra-top(r, c); }
+                    cell-extra-bottom(r, c) => { return root.cell-extra-bottom(r, c); }
+                    cell-extra-left(r, c) => { return root.cell-extra-left(r, c); }
+                    cell-extra-right(r, c) => { return root.cell-extra-right(r, c); }
+                    ctrl-pick-row(r) => { root.ctrl-pick-row(r); }
+                    ctrl-drag-row-to(r) => { root.ctrl-drag-row-to(r); }
+                    ctrl-pick-col(c) => { root.ctrl-pick-col(c); }
+                    ctrl-drag-col-to(c) => { root.ctrl-drag-col-to(c); }
+                    settings-wrap: root.settings-wrap;
+                    table-font-size: root.table-font-size;
+                    table-rect(x, y, w, h) => {
+                        root.table-x = x;
+                        root.table-y = y;
+                        root.table-w = w;
+                        root.table-h = h;
+                    }
+                    col-at(a0) => { return root.col-at(a0); }
+                    focus-table() => { root.focus-table(); }
+                    open-context-menu(a0, a1) => { root.open-context-menu(a0, a1); }
+                    context-cell(r, c) => {
+                        root.ctx-row = r;
+                        root.ctx-col = c;
+                    }
+                    open-file() => { root.open-file(); }
+                    select-all() => { root.select-all(); }
+                }
+
+            // ---------------- 节点面板：参数 + 节点图 ----------------
+            // 两个面板之间的缝：左右拖动调整宽度
+            if root.node-panel-visible: Rectangle {
+                x: main-area.swapped ? main-area.node-w + 4px : main-area.table-w + 4px;
+                y: 4px;
+                width: 4px;
+                height: main-area.height - 8px;
+                background: split-ta.has-hover || split-ta.pressed ? Theme.focus.transparentize(0.4) : transparent;
+
+                split-ta := TouchArea {
+                    mouse-cursor: ew-resize;
+                    moved => {
+                        if (self.pressed) {
+                            root.node-panel-width = max(260px, min(main-area.width - 224px,
+                                main-area.node-w + (main-area.swapped ? 1 : -1) * (self.mouse-x - self.pressed-x)));
+                        }
+                    }
+                }
+            }
+
+            if root.node-panel-visible: NodePanel {
+                x: main-area.swapped ? 4px : main-area.table-w + 8px;
+                y: 4px;
+                width: main-area.node-w;
+                height: main-area.height - 8px;
+                canvas-rect(x, y, w, h) => {
+                    root.canvas-x = x;
+                    root.canvas-y = y;
+                    root.canvas-w = w;
+                    root.canvas-h = h;
+                }
+                ac-index <=> root.ac-index;
+                ac-items <=> root.ac-items;
+                ac-picked <=> root.ac-picked;
+                ac-x <=> root.ac-x;
+                ac-y <=> root.ac-y;
+                add-cat <=> root.add-cat;
+                add-menu-visible <=> root.add-menu-visible;
+                code-hint: root.code-hint;
+                code-layers: root.code-layers;
+                connect-from <=> root.connect-from;
+                drag-active <=> root.drag-active;
+                drag-node <=> root.drag-node;
+                drag-slot <=> root.drag-slot;
+                drag-x <=> root.drag-x;
+                drag-y <=> root.drag-y;
+                focus-area <=> root.focus-area;
+                hover-x <=> root.hover-x;
+                hover-y <=> root.hover-y;
+                node-cat: root.node-cat;
+                node-cats: root.node-cats;
+                node-code: root.node-code;
+                node-desc: root.node-desc;
+                node-kind: root.node-kind;
+                node-source: root.node-source;
+                node-code-head: root.node-code-head;
+                graph-name: root.project-name != "" ? root.project-name
+                    : (root.file-name == "未打开文件" ? "未保存" : root.file-name);
+                node-error: root.node-error;
+                node-warn: root.node-warn;
+                node-kinds: root.node-kinds;
+                node-output: root.node-output;
+                node-params: root.node-params;
+                node-running: root.node-running;
+                node-title: root.node-title;
+                nodes <=> root.nodes;
+                pan-x <=> root.pan-x;
+                pan-y <=> root.pan-y;
+                params-height <=> root.params-height;
+                search-index <=> root.search-index;
+                search-results: root.search-results;
+                search-visible <=> root.search-visible;
+                swap-node: root.swap-node;
+                wire-selected: root.wire-selected;
+                wires: root.wires;
+                zoom <=> root.zoom;
+                zoom-prev <=> root.zoom-prev;
+                origin-x: key-scope.absolute-position.x;
+                origin-y: key-scope.absolute-position.y;
+                add-node(a0) => { root.add-node(a0); }
+                canvas-clicked(a0, a1, a2, a3) => { root.canvas-clicked(a0, a1, a2, a3); }
+                close-search() => { root.close-search(); }
+                code-accept(a0, a1, a2) => { return root.code-accept(a0, a1, a2); }
+                code-edited(a0, a1, a2) => { root.code-edited(a0, a1, a2); }
+                code-key(a0, a1, a2, a3) => { return root.code-key(a0, a1, a2, a3); }
+                connect-nodes(a0, a1, a2) => { root.connect-nodes(a0, a1, a2); }
+                disconnect-input(a0, a1) => { root.disconnect-input(a0, a1); }
+                open-pick(a0, a1, a2) => {
+                    ColPick.anchor-x = a1;
+                    ColPick.anchor-y = a2;
+                    ColPick.open-param(a0);
+                }
+                node-press(a0, a1, a2, a3, a4, a5) => { root.node-press(a0, a1, a2, a3, a4, a5); }
+                node-drag(a0, a1) => { root.node-drag(a0, a1); }
+                node-release => { root.node-release(); }
+                box-select(a0, a1, a2, a3, a4) => { root.box-select(a0, a1, a2, a3, a4); }
+                cut-point(a0, a1) => { root.cut-point(a0, a1); }
+                cut-end => { root.cut-end(); }
+                net-command(a0, a1, a2) => { root.net-command(a0, a1, a2); }
+                open-search => { root.open-search(); }
+                delete-selection => { root.delete-selection(); }
+                space-down: root.space-down;
+                cut-mode: root.cut-mode;
+                cut-trail <=> root.cut-trail;
+                fit-selected <=> root.fit-selected;
+                param-accepted(a0) => { root.param-accepted(a0); }
+                param-action(a0) => { root.param-action(a0); }
+                param-browse(a0) => { root.param-browse(a0); }
+                param-edited(a0, a1) => { root.param-edited(a0, a1); }
+                param-picked(a0, a1) => { root.param-picked(a0, a1); }
+                param-toggled(a0, a1) => { root.param-toggled(a0, a1); }
+                pick-found(a0) => { root.pick-found(a0); }
+                run-graph() => { root.run-graph(); }
+                search-nodes(a0) => { root.search-nodes(a0); }
+                set-display(a0) => { root.set-display(a0); }
+                stop-graph() => { root.stop-graph(); }
+                toggle-bypass(a0) => { root.toggle-bypass(a0); }
+                wire-dropped(a0, a1, a2, a3) => { root.wire-dropped(a0, a1, a2, a3); }
+                grab-focus => { key-scope.focus(); }
+                rename-node(a0) => { root.rename-node(a0); }
+                // 键盘交给主区域：Esc 关帮助（Tab 菜单里中键点的不抢搜索框的焦点）
+                node-info(i) => { return root.node-info(i); }
+                kind-help(source, i, x, y) => { root.place-help(x, y); root.kind-help(source, i); }
+                selected-help => { root.selected-help(); }
+                fit-view(a0, a1, a2) => { root.fit-view(a0, a1, a2); }
+                copy-text(a0) => { root.copy-text(a0); }
+                vop: root.vop;
+                vop-ports: root.vop-ports;
+                net-crumbs: root.net-crumbs;
+                net-context: root.net-context;
+                net-envs: root.net-envs;
+                net-env: root.net-env;
+                net-hint: root.net-hint;
+                node-vop: root.node-vop;
+                node-net: root.node-net;
+                node-cat-icons: root.node-cat-icons;
+                fit-request: root.fit-request;
+                enter-node(a0) => { root.enter-node(a0); }
+                go-up => { root.go-up(); }
+                go-top => { root.go-top(); }
+                go-level(a0) => { root.go-level(a0); }
+                pick-env(a0) => { root.pick-env(a0); }
+                text-action => { root.text-action(); }
+                node-code-label: root.node-code-label;
+                node-text-action: root.node-text-action;
+            }
+            }
+
+            // ---------------- 状态栏：左边状态点 + 状态 + 当前区域的按键提示；右边选区和文件信息 ----------------
+            Rectangle {
+                height: 24px;
+                background: Theme.surface-alt;
+
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 10px;
+
+                    // 运行中蓝、出错红、平时绿
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 7px;
+                            height: 7px;
+                            border-radius: 3.5px;
+                            background: root.busy ? Theme.accent : (root.node-error != "" ? Theme.danger : Theme.cat(0));
+                        }
+                    }
+                    Text {
+                        text: root.status;
+                        color: Theme.text-muted;
+                        font-size: 11.5px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: root.focus-area == 2 && root.vop ? "Tab 添加 · 拖空白处框选 · 中键 / 空格拖平移 · Y 拖剪线 · L 排列 · H 看全部 · U 回上层 · 右键菜单"
+                            : root.focus-area == 2 ? "Tab 添加 · 拖空白处框选 · 中键 / 空格拖平移 · Y 拖剪线 · L 排列 · H 看全部 · Q 旁路 · R 显示 · 右键菜单"
+                            : (root.focus-area == 1 ? "Ctrl+C 复制 · Ctrl+Shift+C 带表头复制 · Ctrl+A 全选" : "");
+                        color: Theme.text-faint;
+                        font-size: 11.5px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: (root.sel-info == "" ? "" : root.sel-info + " · ")
+                            + (root.file-meta == "" || root.stats == "" ? root.stats : root.file-meta + " · " + root.stats);
+                        color: Theme.text-muted;
+                        font-size: 11.5px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // 节点类型编辑器：盖住整个主区域
+        TypeEditor {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: parent.height;
+        }
+
+        // 节点的帮助：浮在面板（和类型编辑器）之上，放不下时往里挪
+        if root.help-visible: HelpWindow {
+            width: min(root.help-w, key-scope.width - 8px);
+            height: min(root.help-h, key-scope.height - 8px);
+            x: max(4px, min(root.help-x < 0 ? key-scope.width - self.width - 24px : root.help-x, key-scope.width - self.width - 4px));
+            y: max(4px, min(root.help-y, key-scope.height - self.height - 4px));
+            title: root.help-title;
+            desc: root.help-desc;
+            category: root.help-category;
+            cat: root.help-cat;
+            badge: root.help-badge;
+            blocks: root.help-blocks;
+            can-back: root.help-can-back;
+            page: root.help-page;
+            close => { root.help-visible = false; }
+            back => { root.help-back(); }
+            link(name) => { root.help-link(name); }
+            drag(dx, dy) => {
+                root.help-x = self.x + dx;
+                root.help-y = self.y + dy;
+            }
+            resize(dw, dh) => {
+                root.help-w = max(340px, self.width + dw);
+                root.help-h = max(240px, self.height + dh);
+            }
+        }
+
+        // 选列框（参数旁边的“选列”）：开着时别处点不了，Esc / 取消 / ✕ 关
+        if ColPick.open: TouchArea {
+            scroll-event(e) => { EventResult.accept }
+        }
+        if ColPick.open: Rectangle {
+            background: Theme.shadow.transparentize(0.6);
+        }
+        if ColPick.open: PickPopup {
+            avail-w: key-scope.width;
+            avail-h: key-scope.height;
+        }
+
+        // 表格的右键菜单：点别处关闭
+        if root.ctx-visible: TouchArea {
+            clicked => { root.ctx-visible = false; }
+        }
+        if root.ctx-visible: ctx-card := Card {
+            x: max(4px, min(root.ctx-x, key-scope.width - self.width - 8px));
+            y: max(4px, min(root.ctx-y, key-scope.height - self.height - 8px));
+            width: 236px;
+            height: ctx-layout.preferred-height;
+            border-radius: 8px;
+
+            // 点在表头 / 格子上时多几项：在表格显示的节点后面建好节点（quick.rs）
+            property <bool> on-header: root.ctx-row < 0 && root.ctx-col >= 0;
+            property <bool> on-cell: root.ctx-row >= 0 && root.ctx-col >= 0;
+            property <bool> many-cols: (root.sel-cols && !root.sel-rows && root.sel-c0 != root.sel-c1)
+                || root.has-extra-cols();
+            function act(name: string) {
+                root.ctx-visible = false;
+                root.quick-action(name, root.ctx-row, root.ctx-col);
+            }
+
+            ctx-layout := VerticalLayout {
+                padding: 4px;
+                if ctx-card.on-header: VerticalLayout {
+                    MenuRow {
+                        label: "从小到大排序";
+                        clicked => { ctx-card.act("sort-asc"); }
+                    }
+                    MenuRow {
+                        label: "从大到小排序";
+                        clicked => { ctx-card.act("sort-desc"); }
+                    }
+                    MenuRow {
+                        label: "统计各值的个数";
+                        clicked => { ctx-card.act("count"); }
+                    }
+                    MenuRow {
+                        label: ctx-card.many-cols ? "去掉选中的列" : "去掉这列";
+                        clicked => { ctx-card.act("drop"); }
+                    }
+                    MenuRow {
+                        label: ctx-card.many-cols ? "只留选中的列" : "只留这列";
+                        clicked => { ctx-card.act("keep"); }
+                    }
+                    MenuSeparator2 {}
+                }
+                if ctx-card.on-cell: VerticalLayout {
+                    MenuRow {
+                        label: "只看等于这个值的行";
+                        clicked => { ctx-card.act("only"); }
+                    }
+                    MenuRow {
+                        label: "去掉等于这个值的行";
+                        clicked => { ctx-card.act("remove"); }
+                    }
+                    MenuSeparator2 {}
+                }
+                MenuRow {
+                    label: "复制";
+                    keys: "Ctrl+C";
+                    clicked => {
+                        root.ctx-visible = false;
+                        root.copy-selection(false);
+                    }
+                }
+                MenuRow {
+                    label: "复制（带表头）";
+                    keys: "Ctrl+Shift+C";
+                    clicked => {
+                        root.ctx-visible = false;
+                        root.copy-selection(true);
+                    }
+                }
+                MenuRow {
+                    label: "全选";
+                    keys: "Ctrl+A";
+                    clicked => {
+                        root.ctx-visible = false;
+                        root.select-all();
+                    }
+                }
+            }
+        }
+
+        // ---------------- 设置 → 显示格式：照 polars 的显示项（pl.Config）----------------
+        // 点外面 / Esc / ✕ 都是关掉不应用，“确定”才应用
+        if root.fmt-visible: TouchArea {
+            clicked => { root.fmt-visible = false; }
+            scroll-event(e) => { EventResult.accept }
+        }
+        if root.fmt-visible: Rectangle {
+            background: Theme.shadow.transparentize(0.6);
+        }
+        if root.fmt-visible: Card {
+            x: (parent.width - self.width) / 2;
+            y: max(24px, (parent.height - self.height) / 2);
+            width: 400px;
+            height: fmt-body.preferred-height + 26px;
+            border-radius: 8px;
+
+            fmt-body := VerticalLayout {
+                padding: 13px;
+                spacing: 12px;
+
+                Text {
+                    text: "显示格式";
+                    color: Theme.text;
+                    font-size: 13px;
+                }
+
+                // 浮点数：方式 + 固定位数
+                VerticalLayout {
+                    spacing: 5px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            width: 88px;
+                            text: "浮点数";
+                            color: Theme.text-muted;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                        ComboBox {
+                            min-width: 118px;
+                            model: ["智能", "完整", "固定小数位"];
+                            current-index <=> root.fmt-float-mode;
+                        }
+                        if root.fmt-float-mode == 2: LineEdit {
+                            width: 52px;
+                            text <=> root.fmt-float-digits;
+                        }
+                        if root.fmt-float-mode == 2: Text {
+                            text: "位小数";
+                            color: Theme.text-faint;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Text {
+                        text: root.fmt-float-mode == 1 ? "完整：1234.5600000000002"
+                            : root.fmt-float-mode == 2 ? "固定位数：1234.56、1,234.50"
+                            : "智能：和 Excel 的常规格式一样，最多 15 位有效数字";
+                        color: Theme.text-faint;
+                        font-size: 11px;
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        width: 88px;
+                        text: "数字分组";
+                        color: Theme.text-muted;
+                        font-size: 12px;
+                    }
+                    VerticalLayout {
+                        spacing: 4px;
+                        CheckBox {
+                            checked <=> root.fmt-thousands;
+                            text: "千位分隔符（1234.56 → 1,234.56）";
+                        }
+                        CheckBox {
+                            checked <=> root.fmt-trim;
+                            text: "固定小数位时去掉末尾的 0";
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        width: 88px;
+                        text: "长文本";
+                        color: Theme.text-muted;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                    LineEdit {
+                        width: 64px;
+                        text <=> root.fmt-max-cell;
+                    }
+                    Text {
+                        text: "一格最多显示多少字符，超出写 …";
+                        color: Theme.text-faint;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        width: 88px;
+                        text: "空值显示";
+                        color: Theme.text-muted;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                    LineEdit {
+                        width: 96px;
+                        text <=> root.fmt-null;
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: "parquet / 节点结果里的空值；空着就不显示";
+                        color: Theme.text-faint;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+                    Button {
+                        text: "恢复默认";
+                        clicked => {
+                            root.fmt-float-mode = 0;
+                            root.fmt-float-digits = "2";
+                            root.fmt-thousands = false;
+                            root.fmt-trim = false;
+                            root.fmt-max-cell = "500";
+                            root.fmt-null = "null";
+                        }
+                    }
+                    Button {
+                        text: "确定";
+                        primary: true;
+                        clicked => {
+                            root.apply-display-fmt();
+                            root.fmt-visible = false;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 代码补全列表：浮在所有面板之上，跟着编辑框里的光标；下面放不下就翻到光标上面。
+        // 列出全部候选，一屏 8 行，多的滚动看。↑↓ 选择，Tab / 回车确认，Esc 关闭
+        if root.ac-items.length > 0: Card {
+            property <length> wanted-y: root.ac-y + 22px;
+            property <length> row-h: 24px;
+            property <length> list-h: min(root.ac-items.length, 8) * self.row-h;
+            property <int> current: root.ac-index;
+            property <[CompletionItem]> items: root.ac-items;
+            x: max(8px, min(root.ac-x, key-scope.width - self.width - 8px));
+            y: self.wanted-y + self.height > key-scope.height - 8px ? root.ac-y - self.height - 4px : self.wanted-y;
+            width: min(480px, key-scope.width - 16px);
+            height: self.list-h + 8px + 24px;
+            border-radius: 8px;
+
+            // 键盘移动选中项：滚到看得见的位置
+            changed current => {
+                if (self.current * self.row-h + ac-list.content-y < 0px) {
+                    ac-list.content-y = -self.current * self.row-h;
+                } else if ((self.current + 1) * self.row-h + ac-list.content-y > self.list-h) {
+                    ac-list.content-y = self.list-h - (self.current + 1) * self.row-h;
+                }
+            }
+            // 候选换了一批：回到开头
+            changed items => { ac-list.content-y = 0px; }
+
+            // 吃掉落在列表空白处的点击和滚轮，不传给下面的面板
+            TouchArea {
+                scroll-event(e) => { EventResult.accept }
+            }
+
+            ac-list := ListView {
+                x: 4px;
+                y: 4px;
+                width: parent.width - 8px;
+                height: parent.list-h;
+
+                for item[ii] in root.ac-items: Rectangle {
+                    height: 24px;
+                    border-radius: 4px;
+                    background: ii == root.ac-index ? Theme.accent-soft
+                        : (ac-ta.has-hover ? Theme.hover : transparent);
+
+                    ac-ta := TouchArea {
+                        clicked => { root.ac-picked = ii; }
+                    }
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 14px;
+                        spacing: 12px;
+                        Text {
+                            text: item.label;
+                            color: ii == root.ac-index ? Theme.accent : Theme.text;
+                            font-family: "Consolas";
+                            font-size: 12.5px;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: item.detail;
+                            color: Theme.text-faint;
+                            font-family: "Consolas";
+                            font-size: 11px;
+                            overflow: elide;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            // 底栏：选中项的说明 + 第几个 / 共几个
+            Rectangle {
+                x: 4px;
+                y: parent.list-h + 4px;
+                width: parent.width - 8px;
+                height: 24px;
+                Rectangle { y: 0px; height: 1px; background: Theme.border; }
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    spacing: 10px;
+                    Text {
+                        horizontal-stretch: 1;
+                        text: root.ac-items[root.ac-index].doc;
+                        color: Theme.text-muted;
+                        font-size: 11px;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: (root.ac-index + 1) + " / " + root.ac-items.length;
+                        color: Theme.text-faint;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}

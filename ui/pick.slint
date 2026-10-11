@@ -1,0 +1,729 @@
+// 参数旁边“列 ▾”弹出的选列框（pick.rs）：列（带类型、可搜索，点一下 ✓、再点 ✗、再点取消）
+// + 选择器条件（polars 的全部 cs.*，条与条之间或 / 且 / 去掉 / 异或，每条可以取反）
+// + 写法和“现在会选到哪几列”（引擎算的）。状态全在 Rust，这里只画、只报。
+
+import { LineEdit, ComboBox, ListView, ScrollView, Button } from "std-widgets.slint";
+import { Theme, Icons } from "theme.slint";
+import { Card, CheckBox, IconButton } from "widgets.slint";
+
+export struct PickCol {
+    name: string,
+    dtype: string,
+    mark: int,        // 0 没选 / 1 选上 ✓ / 2 排除 ✗
+    matched: bool,    // 现在的写法会选到它
+    extra: bool,      // 写法里有、表里没有
+    cursor: bool,     // 键盘移到这一行
+}
+
+export struct PickRow {
+    op: int,          // 和前面的怎么合：0 或者 / 1 并且 / 2 去掉 / 3 只在一边
+    neg: bool,        // 取反
+    kind: int,        // 选择器（ColPick.kinds 的下标）
+    first: bool,
+    has-text: bool,
+    text-label: string,
+    text-hint: string,
+    text: string,
+    dtype-text: bool, // 文字是数据类型：旁边有类型下拉
+    flag1-label: string,  // 空 = 没有这个开关
+    flag1: bool,
+    flag2-label: string,
+    flag2: bool,
+    menu1-label: string,  // 空 = 没有这个下拉
+    menu1-options: [string],
+    menu1: int,
+    menu2-label: string,
+    menu2-options: [string],
+    menu2: int,
+    has-width: bool,
+    width: string,
+    note: string,     // 还要填什么
+}
+
+// 键值对参数（cast_columns 的“列: 类型”…）里入组的一对：一个键（几列或一段选择器）对一个值
+export struct PickGroup {
+    key: string,      // 列名（逗号分开）或选择器的写法
+    value: string,
+    is-selector: bool,   // 键是一段选择器（等宽字体）
+    dtype-text: bool,    // 值是数据类型：旁边有类型下拉
+    count: string,    // 这组在表上选到几列（引擎算的）
+    err: string,      // 这组的写法在表上选不了的原因
+    active: bool,     // 点了它：列上的蓝点只看这一组
+}
+
+export global ColPick {
+    in-out property <bool> open;
+    // 按钮的位置（窗口里的坐标）：框贴着它弹出
+    in-out property <length> anchor-x;
+    in-out property <length> anchor-y;
+    in property <string> title;
+    in property <int> mode;          // 0 列名或选择器 / 1 只要列名 / 2 只要一列
+    in property <bool> dict;         // 键值对：选的是键，另外填值
+    in property <bool> dict-dtype;   // 值是数据类型
+    in property <string> dict-hint;
+    in-out property <string> dict-value;
+    in property <[PickCol]> columns;
+    in property <string> col-summary;
+    in-out property <string> search;
+    in property <[PickRow]> rows;
+    in property <[PickGroup]> groups;
+    in property <bool> can-stage;   // 选好了列、填好了值，可以“加一组”
+    // 拖动 / 拽过之后的位置和大小（x/y = 0 表示没拖过，贴着按钮开；大小拽过一次就一直记得）
+    in-out property <length> box-x;
+    in-out property <length> box-y;
+    in-out property <length> box-w;
+    in-out property <length> box-h;
+    in property <[string]> kinds;
+    in property <[string]> ops;
+    in property <[string]> dtype-names;
+    in property <string> code;
+    in property <string> result;
+    in property <int> result-state;  // 0 好了 / 1 正在算 / 2 出错 / 3 没选
+    in property <string> note;
+    in-out property <bool> append;
+    in property <bool> can-append;
+    in property <bool> ok-enabled;
+
+    callback open-param(int);
+    callback cancel();
+    callback accept();
+    callback search-changed(string);
+    callback col-clicked(int);
+    callback move-cursor(int);
+    callback enter();
+    callback bulk(int);              // 0 全选 / 1 全不选 / 2 反选
+    callback add-row();
+    callback remove-row(int);
+    callback row-op(int, int);
+    callback row-neg(int, bool);
+    callback row-kind(int, int);
+    callback row-text(int, string);
+    callback row-width(int, string);
+    callback row-flag(int, int, bool);
+    callback row-menu(int, int, int);
+    callback row-dtype(int, int);
+    callback append-toggled(bool);
+    callback dict-value-edited(string);
+    callback dict-dtype-picked(int);
+    callback add-group();            // 选好的列 + 值入组
+    callback remove-group(int);
+    callback group-clicked(int);     // 点一组：列上只看它选到的
+    callback group-value-edited(int, string);
+    callback group-dtype-picked(int, int);
+}
+
+// 小号的文字按钮（全选 / 加一条条件…）
+component SmallButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    callback clicked();
+    height: 24px;
+    min-width: txt.preferred-width + 16px;
+    border-radius: 4px;
+    background: !root.enabled ? Theme.surface-alt : (ta.pressed ? Theme.pressed : (ta.has-hover ? Theme.hover : Theme.surface-alt));
+    border-width: 1px;
+    border-color: Theme.border;
+    ta := TouchArea {
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { if (root.enabled) { root.clicked(); } }
+    }
+    txt := Text {
+        text: root.text;
+        color: root.enabled ? Theme.text : Theme.text-faint;
+        font-size: 12px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component Label inherits Text {
+    color: Theme.text-muted;
+    font-size: 12px;
+    vertical-alignment: center;
+}
+
+// 一条条件
+component RowCard inherits Rectangle {
+    in property <PickRow> item;
+    in property <int> index;
+    border-radius: 6px;
+    background: Theme.surface-alt;
+    border-width: 1px;
+    border-color: Theme.border;
+
+    VerticalLayout {
+        padding: 6px;
+        spacing: 5px;
+
+        HorizontalLayout {
+            spacing: 6px;
+            if root.item.first: Label {
+                width: 96px;
+                text: "第一条";
+                horizontal-alignment: center;
+            }
+            if !root.item.first: ComboBox {
+                width: 96px;
+                model: ColPick.ops;
+                current-index: root.item.op;
+                selected => { ColPick.row-op(root.index, self.current-index); }
+            }
+            VerticalLayout {
+                alignment: center;
+                CheckBox {
+                    text: "不是";
+                    checked: root.item.neg;
+                    toggled(on) => { ColPick.row-neg(root.index, on); }
+                }
+            }
+            ComboBox {
+                horizontal-stretch: 1;
+                model: ColPick.kinds;
+                current-index: root.item.kind;
+                selected => { ColPick.row-kind(root.index, self.current-index); }
+            }
+            VerticalLayout {
+                alignment: center;
+                IconButton {
+                    small: true;
+                    icon: Icons.close;
+                    clicked => { ColPick.remove-row(root.index); }
+                }
+            }
+        }
+
+        // 下拉（单位、时区、元素）和长度
+        if root.item.menu1-label != "" || root.item.has-width: HorizontalLayout {
+            spacing: 6px;
+            padding-left: 102px;
+            if root.item.menu1-label != "": Label { text: root.item.menu1-label; }
+            if root.item.menu1-label != "": ComboBox {
+                horizontal-stretch: 1;
+                model: root.item.menu1-options;
+                current-index: root.item.menu1;
+                selected => { ColPick.row-menu(root.index, 0, self.current-index); }
+            }
+            if root.item.menu2-label != "": Label { text: root.item.menu2-label; }
+            if root.item.menu2-label != "": ComboBox {
+                horizontal-stretch: 1;
+                model: root.item.menu2-options;
+                current-index: root.item.menu2;
+                selected => { ColPick.row-menu(root.index, 1, self.current-index); }
+            }
+            if root.item.has-width: Label { text: "长度"; }
+            if root.item.has-width: LineEdit {
+                width: 70px;
+                text: root.item.width;
+                placeholder-text: "任意";
+                edited(text) => { ColPick.row-width(root.index, text); }
+            }
+        }
+
+        // 文字（开头、列名、正则、第几列、类型、时区）
+        if root.item.has-text: HorizontalLayout {
+            spacing: 6px;
+            padding-left: 102px;
+            Label { text: root.item.text-label; }
+            LineEdit {
+                horizontal-stretch: 1;
+                text: root.item.text;
+                placeholder-text: root.item.text-hint;
+                edited(text) => { ColPick.row-text(root.index, text); }
+            }
+            if root.item.dtype-text: ComboBox {
+                width: 104px;
+                model: ColPick.dtype-names;
+                current-index: -1;
+                selected => { ColPick.row-dtype(root.index, self.current-index); }
+            }
+        }
+
+        // 开关
+        if root.item.flag1-label != "": HorizontalLayout {
+            spacing: 16px;
+            padding-left: 102px;
+            alignment: start;
+            CheckBox {
+                text: root.item.flag1-label;
+                checked: root.item.flag1;
+                toggled(on) => { ColPick.row-flag(root.index, 0, on); }
+            }
+            if root.item.flag2-label != "": CheckBox {
+                text: root.item.flag2-label;
+                checked: root.item.flag2;
+                toggled(on) => { ColPick.row-flag(root.index, 1, on); }
+            }
+        }
+
+        if root.item.note != "": Text {
+            x: 102px;
+            text: "· " + root.item.note + "（填好之前这一条不算）";
+            color: Theme.warn;
+            font-size: 11.5px;
+        }
+    }
+}
+
+// 已入组的一对键值（字典参数）：点键只看这组选到的列
+component GroupCard inherits Rectangle {
+    in property <PickGroup> item;
+    in property <int> index;
+    border-radius: 6px;
+    background: root.item.active ? Theme.hover : Theme.surface-alt;
+    border-width: 1px;
+    border-color: root.item.active ? Theme.accent : Theme.border;
+
+    HorizontalLayout {
+        padding: 5px;
+        padding-left: 8px;
+        spacing: 6px;
+
+        Rectangle {
+            horizontal-stretch: 1;
+            key-ta := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { ColPick.group-clicked(root.index); }
+            }
+            if !root.item.is-selector: Text {
+                text: root.item.key;
+                color: root.item.active ? Theme.accent : Theme.text;
+                font-size: 12.5px;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+            if root.item.is-selector: Text {
+                text: root.item.key;
+                color: root.item.active ? Theme.accent : Theme.text;
+                font-family: "Consolas";
+                font-size: 12px;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+        }
+        if root.item.err != "": Text {
+            text: "⚠ " + root.item.err;
+            color: Theme.warn;
+            font-size: 11px;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+        Text {
+            width: 36px;
+            text: root.item.count;
+            color: Theme.text-faint;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+        LineEdit {
+            width: 130px;
+            text: root.item.value;
+            edited(text) => { ColPick.group-value-edited(root.index, text); }
+        }
+        if root.item.dtype-text: ComboBox {
+            width: 104px;
+            model: ColPick.dtype-names;
+            current-index: -1;
+            selected => { ColPick.group-dtype-picked(root.index, self.current-index); }
+        }
+        IconButton {
+            small: true;
+            icon: Icons.close;
+            clicked => { ColPick.remove-group(root.index); }
+        }
+    }
+}
+
+export component PickPopup inherits Card {
+    // 放得下的地方（窗口的大小）
+    in property <length> avail-w;
+    in property <length> avail-h;
+
+    property <bool> can-cond: ColPick.mode != 2;   // 条件（选择器）：只要一列的没有
+    property <length> row-h: 26px;
+
+    width: ColPick.box-w > 0px ? min(ColPick.box-w, root.avail-w - 16px) : min(560px, root.avail-w - 16px);
+    height: ColPick.box-h > 0px ? min(ColPick.box-h, root.avail-h - 16px) : min(lay.preferred-height, root.avail-h - 16px);
+    // 拖过就记住位置，没拖过贴着按钮（右边对齐，下面放不下就往上挪）；大小拽过一次就一直记得
+    x: max(8px, min(ColPick.box-x > 0px ? ColPick.box-x : ColPick.anchor-x - self.width, root.avail-w - self.width - 8px));
+    y: max(8px, min(ColPick.box-y > 0px ? ColPick.box-y : ColPick.anchor-y + 4px, root.avail-h - self.height - 8px));
+
+    init => { search.focus(); }
+
+    // 吃掉框里空白处的点击和滚轮，不传给下面
+    TouchArea {
+        scroll-event(e) => { EventResult.accept }
+    }
+
+    keys := FocusScope {
+        capture-key-pressed(e) => {
+            if (e.text == Key.Escape) {
+                ColPick.cancel();
+                return accept;
+            }
+            if (e.text == Key.Return && e.modifiers.control) {
+                if (ColPick.ok-enabled) {
+                    ColPick.accept();
+                }
+                return accept;
+            }
+            if (search.has-focus && e.text == Key.UpArrow) {
+                ColPick.move-cursor(-1);
+                return accept;
+            }
+            if (search.has-focus && e.text == Key.DownArrow) {
+                ColPick.move-cursor(1);
+                return accept;
+            }
+            reject
+        }
+        // 框里没用掉的键到这为止：别冒泡到主窗口（Delete 会删节点、Ctrl+Z 会撤销节点图）
+        key-pressed(e) => { accept }
+
+        lay := VerticalLayout {
+            padding: 12px;
+            spacing: 8px;
+
+            // 标题：按住拖动，框跟着挪
+            Rectangle {
+                height: 28px;
+                head-ta := TouchArea {
+                    mouse-cursor: move;
+                    moved => {
+                        if (self.pressed) {
+                            ColPick.box-x = root.x + (self.mouse-x - self.pressed-x);
+                            ColPick.box-y = root.y + (self.mouse-y - self.pressed-y);
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: "选列";
+                        color: Theme.text;
+                        font-size: 14px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: ColPick.title + (ColPick.mode == 1 ? " · 只要列名" : ColPick.mode == 2 ? " · 只要一列" : "")
+                            + (ColPick.dict ? " · 一组一组加：选列、填值、加一组" : "");
+                        color: Theme.text-muted;
+                        font-size: 12px;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
+                    IconButton {
+                        small: true;
+                        icon: Icons.close;
+                        clicked => { ColPick.cancel(); }
+                    }
+                }
+            }
+
+            // 搜索 + 全选这些
+            HorizontalLayout {
+                spacing: 6px;
+                search := LineEdit {
+                    horizontal-stretch: 1;
+                    text: ColPick.search;
+                    placeholder-text: "搜索列名…（↑↓ 移动，回车" + (ColPick.mode == 2 ? "选这一列）" : "勾选）");
+                    edited(text) => { ColPick.search-changed(text); }
+                    accepted => { ColPick.enter(); }
+                }
+                if ColPick.mode != 2: SmallButton {
+                    text: "全选";
+                    clicked => { ColPick.bulk(0); }
+                }
+                if ColPick.mode != 2: SmallButton {
+                    text: "全不选";
+                    clicked => { ColPick.bulk(1); }
+                }
+                if ColPick.mode != 2: SmallButton {
+                    text: "反选";
+                    clicked => { ColPick.bulk(2); }
+                }
+            }
+
+            Text {
+                text: ColPick.col-summary + (root.can-cond ? " · 点一下选上（蓝），再点一下排除（红），再点取消" : "")
+                    + " · 蓝点 = 现在会选到";
+                color: Theme.text-faint;
+                font-size: 11px;
+                wrap: word-wrap;
+            }
+
+            // 列
+            Rectangle {
+                vertical-stretch: 1;
+                min-height: 4 * root.row-h + 2px;
+                // 列多时最多一屏 16 行（窗口矮时再往下压），列少时按列数
+                preferred-height: min(max(4, ColPick.columns.length), 16) * root.row-h + 2px;
+                border-radius: 4px;
+                border-width: 1px;
+                border-color: Theme.border;
+                background: Theme.field;
+                clip: true;
+
+                if ColPick.columns.length == 0: Text {
+                    text: ColPick.search != "" ? "没有叫这个的列" : "还不知道有哪些列（上游还没算出来）";
+                    color: Theme.text-faint;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                ListView {
+                    for c[ci] in ColPick.columns: Rectangle {
+                        height: root.row-h;
+                        background: c.cursor ? Theme.hover : (col-ta.has-hover ? Theme.row-hover : transparent);
+
+                        col-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { ColPick.col-clicked(ci); }
+                        }
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 10px;
+                            spacing: 8px;
+
+                            // 选上 / 排除 / 没选（只要一列时是单选的圆点）
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 16px;
+                                    height: 16px;
+                                    border-radius: ColPick.mode == 2 ? 8px : 3px;
+                                    border-width: 1px;
+                                    border-color: c.mark == 1 ? Theme.accent : c.mark == 2 ? Theme.danger : Theme.border-strong;
+                                    background: c.mark == 1 ? Theme.accent : c.mark == 2 ? Theme.danger : Theme.surface;
+                                    // 勾 / 叉（字体里不一定有 ✓ ✗，画出来）
+                                    if c.mark != 0: Path {
+                                        width: 12px;
+                                        height: 12px;
+                                        viewbox-width: 24;
+                                        viewbox-height: 24;
+                                        commands: c.mark == 1 ? "M5 12.5 L10 17.5 L19 7" : "M7 7 L17 17 M17 7 L7 17";
+                                        stroke: Theme.on-accent;
+                                        stroke-width: 2.2px;
+                                        stroke-line-cap: round;
+                                        fill: transparent;
+                                    }
+                                }
+                            }
+                            Text {
+                                horizontal-stretch: 1;
+                                text: c.name + (c.extra ? "（表里没有）" : "");
+                                color: c.extra ? Theme.warn : c.mark == 2 ? Theme.text-faint : Theme.text;
+                                font-size: 12.5px;
+                                overflow: elide;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: c.dtype;
+                                color: Theme.text-faint;
+                                font-family: "Consolas";
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+                            // 现在的写法会选到它
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 8px;
+                                    height: 8px;
+                                    border-radius: 4px;
+                                    background: c.matched ? Theme.accent : transparent;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 条件（选择器）
+            if root.can-cond: HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: "按条件选（选择器）";
+                    color: Theme.text;
+                    font-size: 12.5px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    text: "按类型、列名、位置；从上往下一条条合起来";
+                    color: Theme.text-faint;
+                    font-size: 11px;
+                    overflow: elide;
+                    vertical-alignment: center;
+                }
+                SmallButton {
+                    text: "＋ 加一条条件";
+                    clicked => { ColPick.add-row(); }
+                }
+            }
+            if root.can-cond && ColPick.rows.length == 0: Text {
+                text: "还没有条件。条件能按类型（数字、日期、列表…）、列名（开头是、包含、正则…）、位置（第几列）选列；"
+                    + "几条之间可以“或者 / 并且 / 去掉 / 只在一边”，每条还能取反（不是）。勾的列和条件合起来，再去掉排除的列。";
+                color: Theme.text-faint;
+                font-size: 11.5px;
+                wrap: word-wrap;
+            }
+            if root.can-cond && ColPick.rows.length > 0: ScrollView {
+                height: min(rows-box.preferred-height, 230px);
+                rows-box := VerticalLayout {
+                    spacing: 6px;
+                    padding-right: 12px;
+                    for r[ri] in ColPick.rows: RowCard {
+                        item: r;
+                        index: ri;
+                    }
+                }
+            }
+
+            // 键值对：已入组的键值对，下面是还没入组的当前这组
+            if ColPick.dict && ColPick.groups.length > 0: ScrollView {
+                height: min(groups-box.preferred-height, 190px);
+                groups-box := VerticalLayout {
+                    spacing: 6px;
+                    padding-right: 12px;
+                    for g[gi] in ColPick.groups: GroupCard {
+                        item: g;
+                        index: gi;
+                    }
+                }
+            }
+            if ColPick.dict: HorizontalLayout {
+                spacing: 6px;
+                Label {
+                    width: 40px;
+                    text: "值";
+                }
+                LineEdit {
+                    horizontal-stretch: 1;
+                    text: ColPick.dict-value;
+                    placeholder-text: ColPick.dict-dtype ? "这组转成的类型：Int64、Datetime(\"ms\")…" : ColPick.dict-hint;
+                    edited(text) => { ColPick.dict-value-edited(text); }
+                    accepted => { if (ColPick.can-stage) { ColPick.add-group(); } }
+                }
+                if ColPick.dict-dtype: ComboBox {
+                    width: 112px;
+                    model: ColPick.dtype-names;
+                    current-index: -1;
+                    selected => { ColPick.dict-dtype-picked(self.current-index); }
+                }
+                SmallButton {
+                    enabled: ColPick.can-stage;
+                    text: "＋ 加一组";
+                    clicked => { ColPick.add-group(); }
+                }
+            }
+
+            // 写法和结果
+            Rectangle {
+                border-radius: 4px;
+                background: Theme.surface-alt;
+                VerticalLayout {
+                    padding: 8px;
+                    spacing: 4px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Label {
+                            width: 32px;
+                            text: "写法";
+                            vertical-alignment: top;
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: ColPick.code == "" ? "（空）" : ColPick.code;
+                            color: ColPick.code == "" ? Theme.text-faint : Theme.text;
+                            font-family: "Consolas";
+                            font-size: 12px;
+                            wrap: char-wrap;
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Label {
+                            width: 32px;
+                            text: "结果";
+                            vertical-alignment: top;
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: ColPick.result;
+                            color: ColPick.result-state == 2 ? Theme.danger
+                                : ColPick.result-state == 0 ? Theme.accent : Theme.text-faint;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+
+            if ColPick.note != "": Text {
+                text: ColPick.note;
+                color: Theme.warn;
+                font-size: 11.5px;
+                wrap: word-wrap;
+            }
+
+            // 底下：接在后面 / 取消 / 确定
+            HorizontalLayout {
+                spacing: 8px;
+                if ColPick.can-append && ColPick.mode != 2: CheckBox {
+                    text: "接在原来的后面（不勾 = 替换）";
+                    checked: ColPick.append;
+                    toggled(on) => { ColPick.append-toggled(on); }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Text {
+                    text: "Ctrl+回车 确定 · Esc 取消";
+                    color: Theme.text-faint;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
+                Button {
+                    text: "取消";
+                    clicked => { ColPick.cancel(); }
+                }
+                Button {
+                    text: "确定";
+                    primary: true;
+                    enabled: ColPick.ok-enabled;
+                    clicked => { ColPick.accept(); }
+                }
+            }
+        }
+    }
+
+    // 右下角：拽大小（记得住）
+    Rectangle {
+        x: root.width - self.width - 2px;
+        y: root.height - self.height - 2px;
+        width: 14px;
+        height: 14px;
+        grip := TouchArea {
+            mouse-cursor: nwse-resize;
+            moved => {
+                if (self.pressed) {
+                    ColPick.box-w = max(440px, root.width + (self.mouse-x - self.pressed-x));
+                    ColPick.box-h = max(340px, root.height + (self.mouse-y - self.pressed-y));
+                }
+            }
+        }
+        Path {
+            width: 10px;
+            height: 10px;
+            x: 2px; y: 2px;
+            viewbox-width: 16;
+            viewbox-height: 16;
+            commands: "M14 2 L2 14 M14 8 L8 14";
+            stroke: Theme.border-strong;
+            stroke-width: 1.5px;
+            fill: transparent;
+        }
+    }
+}

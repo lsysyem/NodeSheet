@@ -1,0 +1,733 @@
+// 表格面板：页签（表格 / Python 脚本）+ 路径栏（显示的是哪个节点）+ 表头、虚拟化的数据行、行号列；
+// 点 / 拖动选择格子、行、列。纯显示，数据操作都在节点里做。
+import { Button, ListView } from "std-widgets.slint";
+import { Theme, Icons, ColumnSpec, RowData } from "theme.slint";
+import { PaneTabs, IconButton, CodeEditor } from "widgets.slint";
+
+export component TablePanel inherits Rectangle {
+    // ---- 状态都在 AppWindow 上（Rust 只和它打交道），这里接进来用
+    in property <bool> busy;
+    in-out property <[ColumnSpec]> columns;
+    in property <bool> drag-hover;
+    in property <length> gutter-width;
+    in property <length> row-h;
+    in property <[RowData]> rows;
+    in-out property <bool> sel-active;
+    in-out property <int> sel-c0;
+    in-out property <int> sel-c1;
+    in-out property <bool> sel-cols;
+    in-out property <int> sel-r0;
+    in-out property <int> sel-r1;
+    in-out property <bool> sel-rows;
+    // Ctrl 加选不连续的行 / 列：块在 Rust 侧（见 selection.rs）。sel-gen 在开始一次新选择时 +1，
+    // 对不上就作废；sel-epoch 在块变了时 Rust +1，高亮和状态栏靠它重算
+    in-out property <int> sel-gen;
+    in-out property <int> sel-epoch;
+    in-out property <bool> pick-ctrl;        // 按下时按着 Ctrl：拖动是延长加选的块
+    pure callback row-extra(int) -> bool;    // 行号在 Ctrl 加选的行块里
+    pure callback col-extra(int) -> bool;
+    pure callback cell-extra-top(int, int) -> bool;   // 格子在加选块的外沿（描边用）
+    pure callback cell-extra-bottom(int, int) -> bool;
+    pure callback cell-extra-left(int, int) -> bool;
+    pure callback cell-extra-right(int, int) -> bool;
+    callback ctrl-pick-row(int);             // Ctrl 点行号：加进去，再点去掉
+    callback ctrl-drag-row-to(int);          // Ctrl 按住拖行号：延长最后加的行块
+    callback ctrl-pick-col(int);
+    callback ctrl-drag-col-to(int);
+    in property <bool> settings-wrap;
+    in property <length> table-font-size;
+    callback table-rect(length, length, length, length); // 表格区在窗口里的 x, y, 宽, 高（变了就报）
+    // 路径栏：表格显示的是哪个节点的输出
+    in-out property <int> view-tab;          // 0 表格 / 1 Python 脚本 / 2 查询计划
+    in property <string> view-title;         // 显示节点的名字，空 = 没有节点图
+    in property <string> view-summary;
+    in property <string> view-stats;         // 行 × 列
+    in property <string> view-time;          // 这次运行用了多久
+    in property <string> script-text;        // 整个节点图（到显示节点为止）的 polars 脚本
+    in property <[string]> script-layers;
+    in property <string> plan-text;          // 显示节点的查询计划（polars 的 explain）
+    in property <[string]> plan-layers;
+    in-out property <bool> plan-tree;        // 画成树（像 show_graph），否则是缩进的文字
+
+    pure callback col-at(length) -> int;
+    callback focus-table();
+    callback open-context-menu(length, length);
+    callback context-cell(int, int); // 右键点的是哪一格：(行, 列)；表头行是 -1，行号列是 -1
+    callback open-file();
+    callback select-all();
+    callback show-script();
+    callback copy-script();
+    callback save-script();
+    callback show-plan();
+    callback copy-plan();
+
+    pure function between(v: int, a: int, b: int) -> bool {
+        return v >= min(a, b) && v <= max(a, b);
+    }
+
+    // Ctrl 加选的行 / 列块（Rust 侧）。读一下 sel-epoch 是为了建依赖：块变了以后高亮要重算
+    pure function row-in-extra(r: int) -> bool {
+        return root.sel-epoch >= 0 && root.row-extra(r);
+    }
+    pure function col-in-extra(c: int) -> bool {
+        return root.sel-epoch >= 0 && root.col-extra(c);
+    }
+
+    // 行号列 / 表头的高亮：主矩形覆盖的（整行 / 整列模式按整表展开）+ 加选块
+    pure function row-selected(r: int) -> bool {
+        return root.sel-active && (root.sel-cols || root.between(r, root.sel-r0, root.sel-r1) || root.row-in-extra(r));
+    }
+
+    pure function col-selected(c: int) -> bool {
+        return root.sel-active && (root.sel-rows || root.between(c, root.sel-c0, root.sel-c1) || root.col-in-extra(c));
+    }
+
+    // 主矩形（整行 / 整列模式按整表展开）里的格子：描边只画它的外沿
+    pure function in-primary(r: int, c: int) -> bool {
+        return root.sel-active
+            && (root.sel-cols || root.between(r, root.sel-r0, root.sel-r1))
+            && (root.sel-rows || root.between(c, root.sel-c0, root.sel-c1));
+    }
+
+    // 格子的高亮：主矩形 + 加选的整行块（整行所有列）+ 加选的整列块（整列所有行）
+    pure function cell-selected(r: int, c: int) -> bool {
+        return root.in-primary(r, c) || (root.sel-active && (root.row-in-extra(r) || root.col-in-extra(c)));
+    }
+
+    // 选区的边：选中的格子在这几条边上画描边
+    pure function sel-top(r: int) -> bool {
+        return r == (root.sel-cols ? 0 : min(root.sel-r0, root.sel-r1));
+    }
+    pure function sel-bottom(r: int) -> bool {
+        return r == (root.sel-cols ? root.rows.length - 1 : max(root.sel-r0, root.sel-r1));
+    }
+    pure function sel-left(c: int) -> bool {
+        return c == (root.sel-rows ? 0 : min(root.sel-c0, root.sel-c1));
+    }
+    pure function sel-right(c: int) -> bool {
+        return c == (root.sel-rows ? root.columns.length - 1 : max(root.sel-c0, root.sel-c1));
+    }
+
+    // extend：按着 Shift，从原来的起点拉到这里
+    function select-cell(r: int, c: int, extend: bool) {
+        if (!extend || !root.sel-active || root.sel-rows || root.sel-cols) {
+            root.sel-gen += 1;
+            root.sel-r0 = r;
+            root.sel-c0 = c;
+        }
+        root.sel-r1 = r;
+        root.sel-c1 = c;
+        root.sel-rows = false;
+        root.sel-cols = false;
+        root.sel-active = true;
+    }
+
+    function select-row(r: int, extend: bool) {
+        if (!extend || !root.sel-active || !root.sel-rows || root.sel-cols) {
+            root.sel-gen += 1;
+            root.sel-r0 = r;
+        }
+        root.sel-r1 = r;
+        root.sel-rows = true;
+        root.sel-cols = false;
+        root.sel-active = true;
+    }
+
+    function select-col(c: int, extend: bool) {
+        if (!extend || !root.sel-active || !root.sel-cols || root.sel-rows) {
+            root.sel-gen += 1;
+            root.sel-c0 = c;
+        }
+        root.sel-c1 = c;
+        root.sel-cols = true;
+        root.sel-rows = false;
+        root.sel-active = true;
+    }
+
+    background: Theme.surface;
+    border-width: 1px;
+    border-color: Theme.edge;
+    border-radius: 3px;
+    clip: true;
+
+    PaneTabs {
+        y: 0px;
+        tabs: ["表格", "Python 脚本", "查询计划"];
+        current <=> root.view-tab;
+        picked(i) => {
+            if (i == 1) {
+                root.show-script();
+            }
+            if (i == 2) {
+                root.show-plan();
+            }
+        }
+    }
+
+    // 路径栏：表格页说显示的是哪个节点、多少行列、用了多久；脚本页是复制 / 存成 .py
+    path-bar := Rectangle {
+        y: 26px;
+        height: 28px;
+        background: Theme.pane-head;
+        HorizontalLayout {
+            padding-left: 10px;
+            padding-right: 6px;
+            spacing: 8px;
+            if root.view-tab == 0 && root.view-title != "": VerticalLayout {
+                alignment: center;
+                // 显示标记的颜色，和节点右端的旗标一样
+                Rectangle {
+                    width: 10px;
+                    height: 14px;
+                    border-radius: 2px;
+                    background: Theme.accent;
+                }
+            }
+            if root.view-tab == 0 && root.view-title != "": Text {
+                text: "显示";
+                color: Theme.text-faint;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+            if root.view-tab == 0: Text {
+                text: root.view-title;
+                color: Theme.text;
+                font-size: 12px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+            if root.view-tab == 0: Text {
+                horizontal-stretch: 1;
+                text: root.view-summary;
+                color: Theme.text-faint;
+                font-family: "Consolas";
+                font-size: 11.5px;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+            if root.view-tab == 0: Text {
+                text: root.view-stats;
+                color: Theme.text-muted;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+            if root.view-tab == 0 && root.view-time != "": Text {
+                text: root.view-time;
+                color: Theme.text-faint;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+            if root.view-tab == 1: Text {
+                horizontal-stretch: 1;
+                text: root.view-title == "" ? "还没有节点图" : "从源节点到 " + root.view-title + " 的 polars 脚本，能直接用 python 运行";
+                color: Theme.text-muted;
+                font-size: 12px;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+            if root.view-tab == 1: VerticalLayout {
+                alignment: center;
+                IconButton {
+                    small: true;
+                    icon: Icons.copy;
+                    label: "复制";
+                    clicked => { root.copy-script(); }
+                }
+            }
+            if root.view-tab == 1: VerticalLayout {
+                alignment: center;
+                IconButton {
+                    small: true;
+                    icon: Icons.save;
+                    label: "存成 .py…";
+                    clicked => { root.save-script(); }
+                }
+            }
+            if root.view-tab == 2: Text {
+                horizontal-stretch: 1;
+                text: root.view-title == "" ? "还没有节点图" : "polars 算 " + root.view-title + " 要做的步骤（从下往上读）：先是优化后的，再是优化前的";
+                color: Theme.text-muted;
+                font-size: 12px;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+            if root.view-tab == 2: VerticalLayout {
+                alignment: center;
+                IconButton {
+                    small: true;
+                    icon: Icons.nodes;
+                    label: root.plan-tree ? "画成文字" : "画成树";
+                    clicked => {
+                        root.plan-tree = !root.plan-tree;
+                        root.show-plan();
+                    }
+                }
+            }
+            if root.view-tab == 2: VerticalLayout {
+                alignment: center;
+                IconButton {
+                    small: true;
+                    icon: Icons.copy;
+                    label: "复制";
+                    clicked => { root.copy-plan(); }
+                }
+            }
+        }
+        Rectangle { y: parent.height - 1px; height: 1px; background: Theme.edge; }
+    }
+
+    // Python 脚本页：只看不改，带语法高亮
+    if root.view-tab == 1: CodeEditor {
+        x: 6px;
+        y: 60px;
+        width: parent.width - 12px;
+        height: parent.height - 66px;
+        read-only: true;
+        value: root.script-text;
+        layers: root.script-layers;
+        item-count: 0;
+        accept(text, cursor, pick) => { return { text: text, cursor: cursor }; }
+        key(text, anchor, cursor, name) => { return { text: text, cursor: cursor }; }
+    }
+
+    // 查询计划页：只看不改
+    if root.view-tab == 2: CodeEditor {
+        x: 6px;
+        y: 60px;
+        width: parent.width - 12px;
+        height: parent.height - 66px;
+        read-only: true;
+        value: root.plan-text;
+        layers: root.plan-layers;
+        item-count: 0;
+        accept(text, cursor, pick) => { return { text: text, cursor: cursor }; }
+        key(text, anchor, cursor, name) => { return { text: text, cursor: cursor }; }
+    }
+
+    table-page := Rectangle {
+        y: 54px;
+        height: parent.height - 54px;
+        visible: root.view-tab == 0;
+
+        // 表格区在窗口里的位置报给主窗口：Ctrl + 滚轮落在上面时缩放（Rust 的 view::zoom_table）
+        property <length> abs-x: self.absolute-position.x;
+        property <length> abs-y: self.absolute-position.y;
+        function report() {
+            root.table-rect(self.abs-x, self.abs-y, self.width, self.height);
+        }
+        init => { self.report(); }
+        changed abs-x => { self.report(); }
+        changed abs-y => { self.report(); }
+        changed width => { self.report(); }
+        changed height => { self.report(); }
+
+    VerticalLayout {
+        // 表头（不随行滚动，横向偏移跟随表格）
+        header-clip := Rectangle {
+            clip: true;
+            min-width: 0px;
+            max-width: 999999px;
+            height: max(34px, header-layout.preferred-height, header-layout.min-height);
+            background: Theme.header-bg;
+
+            header-layout := HorizontalLayout {
+                x: table.content-x + root.gutter-width;
+                width: max(self.preferred-width, root.width - root.gutter-width);
+
+                for col[i] in root.columns: hcell := Rectangle {
+                    min-width: col.width;
+                    max-width: col.width;
+                    background: root.col-selected(i) ? Theme.accent-soft : transparent;
+
+                    // 点列名选整列，拖过去选多列，右键复制；Ctrl 点加选不连续的列
+                    TouchArea {
+                        pointer-event(e) => {
+                            if (e.kind == PointerEventKind.down) {
+                                root.focus-table();
+                                // Ctrl 只在整列模式（且不是全选）下加选：区域 / 整行选择时当普通新选择
+                                root.pick-ctrl = e.button == PointerEventButton.left && e.modifiers.control
+                                    && root.sel-active && root.sel-cols && !root.sel-rows;
+                                if (e.button == PointerEventButton.left) {
+                                    if (root.pick-ctrl) {
+                                        root.ctrl-pick-col(i);
+                                    } else {
+                                        root.select-col(i, e.modifiers.shift);
+                                    }
+                                } else if (e.button == PointerEventButton.right) {
+                                    if (!root.sel-cols || !root.col-selected(i)) {
+                                        root.select-col(i, false);
+                                    }
+                                    root.context-cell(-1, i);
+                                    root.open-context-menu(self.absolute-position.x + self.mouse-x,
+                                        self.absolute-position.y + self.mouse-y);
+                                }
+                            }
+                            if (e.kind == PointerEventKind.up) {
+                                root.pick-ctrl = false;
+                            }
+                        }
+                        moved => {
+                            if (self.pressed) {
+                                if (root.pick-ctrl) {
+                                    root.ctrl-drag-col-to(root.col-at(parent.x + self.mouse-x));
+                                } else {
+                                    root.sel-c1 = root.col-at(parent.x + self.mouse-x);
+                                }
+                            }
+                        }
+                    }
+
+                    // 列名要几行：按单行宽度和列宽估算（换行文字的高度布局里算不出来，要自己给）
+                    title-measure := Text {
+                        x: 0px;
+                        y: 0px;
+                        visible: false;
+                        text: col.title;
+                        font-weight: 600;
+                        font-size: root.table-font-size;
+                    }
+                    property <int> title-lines: max(1, ceil(title-measure.preferred-width / max(1px, col.width - 24px)));
+
+                    VerticalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        padding-top: col.dtype == "" ? 8px : 4px;
+                        padding-bottom: col.dtype == "" ? 8px : 4px;
+                        spacing: 0px;
+
+                        // 表头只显示列名和类型；筛选、排序都用节点做
+                        Text {
+                            min-height: hcell.title-lines * (root.table-font-size + 5px);
+                            text: col.title;
+                            color: Theme.text;
+                            font-weight: 600;
+                            font-size: root.table-font-size;
+                            wrap: word-wrap; // 窄列时标题自动换行，表头跟着变高
+                            horizontal-alignment: col.numeric ? right : left;
+                            vertical-alignment: top;
+                        }
+                        if col.dtype != "": Text {
+                            text: col.dtype;
+                            color: Theme.text-faint;
+                            font-family: "Consolas";
+                            font-size: max(9.5px, root.table-font-size - 2.5px);
+                            overflow: elide; // 嵌套的类型可能很长：窄列时截断，不撑宽列
+                            horizontal-alignment: col.numeric ? right : left;
+                        }
+                    }
+
+                    // 列宽拖拽（含最后一列）
+                    TouchArea {
+                        x: parent.width - 5px;
+                        width: 10px;
+                        y: 0px;
+                        height: parent.height;
+                        mouse-cursor: ew-resize;
+                        moved => {
+                            if (self.pressed) {
+                                root.columns[i].width = max(48px,
+                                    col.width + (self.mouse-x - self.pressed-x));
+                            }
+                        }
+                    }
+
+                    Rectangle { x: parent.width - 1px; width: 1px; background: Theme.grid; }
+                }
+            }
+
+            // 左上角（行号列表头，固定）
+            Rectangle {
+                x: 0px;
+                width: root.gutter-width;
+                background: Theme.header-bg;
+                // 左上角：全选
+                TouchArea {
+                    clicked => {
+                        root.focus-table();
+                        root.select-all();
+                    }
+                }
+                Text {
+                    text: "#";
+                    color: Theme.text-faint;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                Rectangle { x: parent.width - 1px; width: 1px; background: Theme.border; }
+            }
+
+            Rectangle { y: parent.height - 1px; height: 1px; background: Theme.border; }
+        }
+
+        // 数据行（虚拟化）
+        table := ListView {
+            vertical-stretch: 1;
+            min-width: 0px;
+            max-width: 999999px;
+
+            for row[idx] in root.rows: Rectangle {
+                height: root.settings-wrap ? max(root.row-h, cells.min-height) : root.row-h;
+                // 宽度必须显式给全：编译器默认把行宽绑到视口宽（flickable.width），
+                // 单元格靠溢出画到视口外，看得见但 TouchArea 够不着——滚过去就选不了
+                min-width: cells.min-width;
+                width: cells.min-width;
+                background: row-ta.has-hover ? Theme.row-hover
+                    : (mod(idx, 2) == 0 ? Theme.surface : Theme.row-alt);
+
+                // 点格子选中，拖动选一块，Shift + 点从起点拉到这里；列由 Rust 按列宽算
+                row-ta := TouchArea {
+                    pointer-event(e) => {
+                        if (e.kind == PointerEventKind.down) {
+                            root.focus-table();
+                            if (e.button == PointerEventButton.left) {
+                                root.select-cell(idx, root.col-at(self.mouse-x - root.gutter-width),
+                                    e.modifiers.shift);
+                            } else if (e.button == PointerEventButton.right) {
+                                // 右键点在选区外：先选中这个格子
+                                if (!root.cell-selected(idx, root.col-at(self.mouse-x - root.gutter-width))) {
+                                    root.select-cell(idx, root.col-at(self.mouse-x - root.gutter-width), false);
+                                }
+                                root.context-cell(idx, root.col-at(self.mouse-x - root.gutter-width));
+                                root.open-context-menu(self.absolute-position.x + self.mouse-x,
+                                    self.absolute-position.y + self.mouse-y);
+                            }
+                        }
+                    }
+                    moved => {
+                        if (self.pressed) {
+                            root.sel-r1 = max(0, idx + floor(self.mouse-y / self.height));
+                            root.sel-c1 = root.col-at(self.mouse-x - root.gutter-width);
+                        }
+                    }
+                }
+
+                // 行号列的位置用占位块留出：给布局设 x 会让行的 min-width 约束失效（横向滚动条消失）
+                cells := HorizontalLayout {
+                    Rectangle {
+                        min-width: root.gutter-width;
+                        max-width: root.gutter-width;
+                    }
+
+                    for cell[i] in row.cells: Rectangle {
+                        min-width: root.columns[i].width;
+                        max-width: root.columns[i].width;
+                        clip: true;
+                        background: root.cell-selected(idx, i) ? Theme.row-sel : transparent;
+                        min-height: root.settings-wrap ? (cell-txt.preferred-height + 6px) : 0px;
+
+                        cell-txt := Text {
+                            x: 10px;
+                            width: parent.width - 20px;
+                            text: cell.text;
+                            color: Theme.text;
+                            font-size: root.table-font-size;
+                            wrap: root.settings-wrap ? word-wrap : no-wrap;
+                            overflow: elide;
+                            horizontal-alignment: root.columns[i].numeric ? right : left;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle {
+                            x: parent.width - 1px;
+                            width: 1px;
+                            background: Theme.grid;
+                        }
+
+                        // 选区的描边：选中的格子在选区的外沿画线
+                        Rectangle {
+                            visible: (root.in-primary(idx, i) && root.sel-top(idx) && (idx <= 0 || !root.cell-selected(idx - 1, i)))
+                            || root.cell-extra-top(idx, i);
+                            y: 0px;
+                            height: 1.5px;
+                            background: Theme.accent;
+                        }
+                        Rectangle {
+                            visible: (root.in-primary(idx, i) && root.sel-bottom(idx)
+                            && (idx >= root.rows.length - 1 || !root.cell-selected(idx + 1, i)))
+                            || root.cell-extra-bottom(idx, i);
+                            y: parent.height - 1.5px;
+                            height: 1.5px;
+                            background: Theme.accent;
+                        }
+                        Rectangle {
+                            visible: (root.in-primary(idx, i) && root.sel-left(i) && (i <= 0 || !root.cell-selected(idx, i - 1)))
+                            || root.cell-extra-left(idx, i);
+                            x: 0px;
+                            width: 1.5px;
+                            background: Theme.accent;
+                        }
+                        Rectangle {
+                            visible: (root.in-primary(idx, i) && root.sel-right(i)
+                            && (i >= root.columns.length - 1 || !root.cell-selected(idx, i + 1)))
+                            || root.cell-extra-right(idx, i);
+                            x: parent.width - 1.5px;
+                            width: 1.5px;
+                            background: Theme.accent;
+                        }
+                    }
+                }
+
+                // 行号列：抵消横向滚动固定在左侧，最后声明以覆盖在单元格上
+                Rectangle {
+                    x: -table.content-x;
+                    width: root.gutter-width;
+                    background: root.row-selected(idx) ? Theme.row-sel : Theme.gutter-bg;
+
+                    // 点行号选整行，拖动选多行；Ctrl 点加选不连续的行
+                    TouchArea {
+                        pointer-event(e) => {
+                            if (e.kind == PointerEventKind.down) {
+                                root.focus-table();
+                                // Ctrl 只在整行模式（且不是全选）下加选：区域 / 整列选择时当普通新选择
+                                root.pick-ctrl = e.button == PointerEventButton.left && e.modifiers.control
+                                    && root.sel-active && root.sel-rows && !root.sel-cols;
+                                if (e.button == PointerEventButton.left) {
+                                    if (root.pick-ctrl) {
+                                        root.ctrl-pick-row(idx);
+                                    } else {
+                                        root.select-row(idx, e.modifiers.shift);
+                                    }
+                                } else if (e.button == PointerEventButton.right) {
+                                    if (!root.sel-rows || !root.row-selected(idx)) {
+                                        root.select-row(idx, false);
+                                    }
+                                    root.context-cell(idx, -1);
+                                    root.open-context-menu(self.absolute-position.x + self.mouse-x,
+                                        self.absolute-position.y + self.mouse-y);
+                                }
+                            }
+                            if (e.kind == PointerEventKind.up) {
+                                root.pick-ctrl = false;
+                            }
+                        }
+                        moved => {
+                            if (self.pressed) {
+                                if (root.pick-ctrl) {
+                                    root.ctrl-drag-row-to(max(0, idx + floor(self.mouse-y / self.height)));
+                                } else {
+                                    root.sel-r1 = max(0, idx + floor(self.mouse-y / self.height));
+                                }
+                            }
+                        }
+                    }
+
+                    Text {
+                        x: 0px;
+                        width: parent.width - 10px;
+                        text: row.num;
+                        color: root.row-selected(idx) ? Theme.accent : Theme.text-faint;
+                        font-size: root.table-font-size - 1px;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+                    if root.sel-rows && root.row-selected(idx): Rectangle {
+                        x: 0px;
+                        width: 3px;
+                        background: Theme.accent;
+                    }
+                    Rectangle { x: parent.width - 1px; width: 1px; background: Theme.border; }
+                }
+            }
+        }
+    }
+    }
+
+    // 忙碌指示：路径栏下沿 2px 不定进度条
+    if root.busy: Rectangle {
+        y: 52px;
+        height: 2px;
+        clip: true;
+        background: Theme.accent-soft;
+
+        Rectangle {
+            width: parent.width * 0.3;
+            x: mod(animation-tick() / 1ms, 1400) / 1400 * parent.width * 1.3 - self.width;
+            background: Theme.accent;
+        }
+    }
+
+    // 空状态
+    if root.columns.length == 0 && root.view-tab == 0: Rectangle {
+        y: 54px;
+        height: parent.height - 54px;
+        background: Theme.surface;
+
+        Rectangle {
+            width: min(440px, parent.width - 32px);
+            height: 260px;
+            x: (parent.width - self.width) / 2;
+            y: max(0px, (parent.height - self.height) / 2 - 20px);
+            border-radius: 14px;
+            border-width: 2px;
+            border-color: root.drag-hover ? Theme.accent : Theme.border-strong;
+            background: root.drag-hover ? Theme.accent-soft : Theme.surface-alt;
+
+            VerticalLayout {
+                alignment: center;
+                padding: 20px;
+                spacing: 12px;
+
+                HorizontalLayout {
+                    alignment: center;
+                    Path {
+                        width: 44px;
+                        height: 44px;
+                        viewbox-width: 24;
+                        viewbox-height: 24;
+                        commands: Icons.file;
+                        stroke: Theme.accent;
+                        stroke-width: 1.3px;
+                        stroke-line-cap: round;
+                        fill: transparent;
+                    }
+                }
+
+                Text {
+                    text: root.drag-hover ? "松开鼠标即可打开" : "拖放表格文件到这里";
+                    color: Theme.text;
+                    font-size: 17px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                }
+
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 6px;
+
+                    for f in ["xlsx", "xlsm", "xls", "xlsb", "ods", "parquet", "csv", "tsv"]: Rectangle {
+                        height: 20px;
+                        min-width: fmt-txt.preferred-width + 14px;
+                        border-radius: 10px;
+                        background: Theme.chip-bg;
+
+                        fmt-txt := Text {
+                            text: f;
+                            color: Theme.text-muted;
+                            font-size: 11px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: center;
+                    padding-top: 4px;
+                    Button {
+                        text: "打开文件";
+                        primary: true;
+                        clicked => { root.open-file(); }
+                    }
+                }
+
+                Text {
+                    text: "Ctrl+O 打开 · 筛选、排序等操作在节点面板里做";
+                    color: Theme.text-faint;
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+    }
+}

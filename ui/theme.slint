@@ -1,0 +1,216 @@
+// 界面共用的数据结构、颜色令牌和图标。
+import { Palette } from "std-widgets.slint";
+
+// 表格列：标题、宽度（用户可拖拽调整）
+export struct ColumnSpec {
+    title: string,
+    width: length,
+    numeric: bool, // 数值列：单元格右对齐
+    dtype: string, // 列类型（str / i64 / date…），不知道时为空
+}
+
+// 一行数据：原始行号 + 可见列单元格
+export struct RowData {
+    num: string,
+    cells: [StandardListViewItem],
+}
+
+// 节点图里的一个节点（x/y 是画布坐标，拖动时由界面直接改）
+export struct NodeItem {
+    title: string,
+    x: length,
+    y: length,
+    inputs: int,    // 输入端口数
+    selected: bool,
+    display: bool,  // 表格显示的是这个节点的输出
+    bypass: bool,
+    error: bool,
+    cat: int,        // 分类（决定图标和颜色）
+    summary: string, // 第二行：填了的参数
+    badge: string,   // 名字后面的来源标签（已改内置 / 私有参数），空 = 不标
+    // 表达式网络里的节点才用：
+    dtype: string,   // 输出的类型（str / i64 / list[i64]…），还没算过是空
+    tgroup: int,     // 类型的颜色组（见 Theme.tcolor）
+    output: bool,    // 输出节点（列 / 键 / 条件 / 排序）
+    warn: bool,      // summary 是提醒（用不到的输出、没聚合…），不算出错
+}
+
+// 表达式节点上的一个输入端口（一行）：node 是 nodes 里的下标，slot 是第几个端口
+export struct PortItem {
+    node: int,
+    slot: int,
+    label: string,
+    value: string, // 没连线时填的值
+    wired: bool,
+}
+
+// 连线：src 节点的输出 → dst 节点的第 slot 个输入（都是 nodes 里的下标）
+export struct WireItem {
+    src: int,
+    dst: int,
+    slot: int,
+    selected: bool, // 选中的连线：按 Delete 删除
+    hot: bool,      // 正拖着的节点压在这条线上：松手就插进去
+}
+
+// 代码补全的一项
+export struct CompletionItem {
+    label: string,
+    detail: string, // 签名或种类
+    doc: string,
+}
+
+// 代码编辑框的一次改写：新文本 + 新光标位置（字节偏移）
+export struct CodeEdit {
+    text: string,
+    cursor: int,
+}
+
+// 选中节点的一个参数
+export struct ParamItem {
+    id: int,           // 在节点参数表里的下标（面板只列当前页签的参数，回调里报这个）
+    label: string,
+    value: string,     // 按钮：按钮上的字
+    hint: string,
+    kind: int,         // 0 文本 / 1 多行代码 / 2 开关 / 3 下拉 / 4 文件路径 / 5 页签 / 6 按钮 / 7 连了线的端口 / 8 数据类型（输入框 + 下拉）
+    options: [string], // 下拉 / 页签的选项
+    index: int,        // 下拉 / 页签当前选中的下标
+    stacked: bool,     // 标签在上、编辑框占满一行（表达式、路径等长内容）
+    pick: bool,        // 旁边有“选列”按钮（弹出选列框，pick.rs）
+}
+
+// 可添加的节点种类
+// “文件”菜单里最近打开的一项
+export struct RecentItem {
+    name: string,   // 文件名
+    folder: string, // 在哪个文件夹（太长时只留后面）
+}
+
+export struct KindItem {
+    name: string,
+    desc: string,
+    cat: int,
+}
+
+// 帮助窗口里的一行（见 src/help.rs）
+export struct HelpBlock {
+    kind: int,     // 0 段落 / 1 节标题（参数、输入…）/ 2 小标题 / 3 列表项 / 4 代码 / 5 参数条目 / 6 相关节点（可点）/ 7 这个节点的情况 / 8 淡色小字
+    text: string,
+    label: string, // 参数条目的标签、相关节点的类型名
+    indent: bool,  // 参数条目下面的说明
+}
+
+// 颜色令牌：全部由当前配色（浅/深）推导，界面里不写死颜色
+export global Theme {
+    // 跟随系统时 Palette.color-scheme 读回 unknown，用前景色判断实际深浅
+    out property <bool> dark: Palette.foreground == #ffffff;
+
+    // 深色照 Houdini：中性灰、面板之间是更深的缝；浅色是同一套结构的亮版
+    out property <color> bg: dark ? #1c1c1c : #d5d8dd;            // 面板之间的缝、窗口底色
+    out property <color> surface: dark ? #2b2b2b : #ffffff;       // 面板、表格行
+    out property <color> surface-alt: dark ? #262626 : #eef0f3;   // 页签条、状态栏、代码预览
+    out property <color> pane-head: dark ? #333333 : #e6e9ed;     // 面板的路径栏、参数面板的节点头
+    out property <color> param-bg: dark ? #383838 : #f4f5f7;      // 参数表单底色
+    out property <color> field: dark ? #1e1e1e : #ffffff;         // 输入框、代码框
+    out property <color> edge: dark ? #141414 : #b9bec6;          // 面板外框
+    out property <color> border: dark ? #3a3a3a : #dde1e6;
+    out property <color> border-strong: dark ? #4f4f4f : #c3c9d1;
+    out property <color> text: dark ? #d8d8d8 : #1f2328;
+    out property <color> text-muted: dark ? #b0b0b0 : #4f5763;
+    out property <color> text-faint: dark ? #959595 : #667080;    // 白 / 深灰底上都够 4.5:1
+    out property <color> accent: dark ? #5b9cff : #2563eb;        // 显示标记、选区、链接
+    out property <color> accent-soft: dark ? #2f3d52 : #dbe6fb;
+    out property <color> focus: dark ? #e8a33d : #c47a12;         // 当前页签、正在编辑的框（Houdini 的橙）
+    out property <color> select: dark ? #f2c037 : #b88400;        // 选中的节点
+    out property <color> hover: dark ? #3a3a3a : #e6e9ed;
+    out property <color> pressed: dark ? #454545 : #d8dce2;
+    out property <color> header-bg: dark ? #333333 : #f1f3f5;
+    out property <color> header-hover: dark ? #3a3a3a : #e8ebee;
+    out property <color> row-alt: dark ? #303030 : #f8f9fa;
+    out property <color> row-hover: dark ? #363636 : #f0f4fb;
+    out property <color> row-sel: dark ? #2f3d52 : #dde8fb;
+    out property <color> grid: dark ? #3a3a3a : #e6e9ed;
+    out property <color> gutter-bg: dark ? #262626 : #f1f3f5;
+    out property <color> chip-bg: dark ? #474747 : #e6e9ed;
+    out property <color> danger: dark ? #f2665e : #d92d20;
+    out property <color> warn: dark ? #e8b923 : #e0a400;          // 旁路标记
+    out property <color> on-warn: #2b2000;
+    out property <color> shadow: dark ? #00000099 : #0f172a30;
+    out property <color> on-accent: dark ? #10141a : #ffffff;
+    // 节点图
+    out property <color> canvas: dark ? #373737 : #cdd1d6;
+    out property <color> canvas-grid: dark ? #3f3f3f : #c3c7cd;
+    out property <color> node-bg: dark ? #505050 : #e4e6e9;      // 节点卡片
+    out property <color> node-cap: dark ? #444444 : #d2d5da;     // 两端没点亮的旗标
+    out property <color> node-edge: dark ? #161616 : #7d838c;
+    out property <color> node-shadow: dark ? #00000066 : #0f172a1f;
+    out property <color> wire: dark ? #8a8a8a : #6f7680;
+    out property <color> port: dark ? #9a9a9a : #6f7680;
+
+    // 代码高亮：普通 / 关键字 / 字符串 / 注释 / 数字 / 函数调用
+    pure public function code(i: int) -> color {
+        i == 1 ? (dark ? #c586c0 : #af00db)
+            : i == 2 ? (dark ? #ce9178 : #a31515)
+            : i == 3 ? (dark ? #6a9955 : #008000)
+            : i == 4 ? (dark ? #b5cea8 : #098658)
+            : i == 5 ? (dark ? #dcdcaa : #795e26)
+            : text
+    }
+
+    // 表达式的类型颜色组：0 不知道 / 1 数字 / 2 文字 / 3 真假 / 4 日期时间 / 5 列表结构 / 6 出错
+    pure public function tcolor(t: int) -> color {
+        t == 1 ? (dark ? #60a5fa : #2563eb)
+            : t == 2 ? (dark ? #f472b6 : #db2777)
+            : t == 3 ? (dark ? #fbbf24 : #b45309)
+            : t == 4 ? (dark ? #2dd4bf : #0d9488)
+            : t == 5 ? (dark ? #a78bfa : #7c3aed)
+            : t == 6 ? danger
+            : wire
+    }
+
+    // 节点分类的颜色：IO / 行 / 列 / 表达式 / 统计 / 变形 / 多表 / 代码
+    pure public function cat(i: int) -> color {
+        i == 0 ? (dark ? #4ade80 : #16a34a)
+            : i == 1 ? (dark ? #60a5fa : #2563eb)
+            : i == 2 ? (dark ? #a78bfa : #7c3aed)
+            : i == 3 ? (dark ? #f472b6 : #db2777)
+            : i == 4 ? (dark ? #fbbf24 : #d97706)
+            : i == 5 ? (dark ? #fb923c : #ea580c)
+            : i == 6 ? (dark ? #2dd4bf : #0d9488)
+            : (dark ? #94a3b8 : #64748b)
+    }
+}
+
+// 图标（24×24 视框，描边绘制）
+export global Icons {
+    out property <string> file: "M6 2.5 H14 L19.5 8 V20.5 A1 1 0 0 1 18.5 21.5 H6 A1 1 0 0 1 5 20.5 V3.5 A1 1 0 0 1 6 2.5 Z M14 2.5 V8 H19.5 M8.5 12.5 H16 M8.5 16 H16 M12.2 12.5 V19";
+    out property <string> close: "M6.5 6.5 L17.5 17.5 M17.5 6.5 L6.5 17.5";
+    out property <string> nodes: "M4 3.5 H12 V8.5 H4 Z M12 15.5 H20 V20.5 H12 Z M8 8.5 V12 H16 V15.5";
+    out property <string> play: "M7.5 5 L18.5 12 L7.5 19 Z";
+    out property <string> stop: "M7 7 H17 V17 H7 Z";
+    out property <string> plus: "M12 5 V19 M5 12 H19";
+    out property <string> bypass: "M4 12 H9 M15 12 H20 M9 7 L15 17";
+    out property <string> eye: "M2.5 12 C5.5 7 9 5.5 12 5.5 C15 5.5 18.5 7 21.5 12 C18.5 17 15 18.5 12 18.5 C9 18.5 5.5 17 2.5 12 Z M12 9.2 A2.8 2.8 0 1 0 12 14.8 A2.8 2.8 0 1 0 12 9.2 Z";
+    out property <string> code: "M8.5 7 L3.5 12 L8.5 17 M15.5 7 L20.5 12 L15.5 17";
+    out property <string> copy: "M9 9 H19 V19 H9 Z M15 9 V5 H5 V15 H9";
+    out property <string> chevron: "M9 6 L15 12 L9 18";
+    out property <string> columns: "M4 5 L20 5 L20 19 L4 19 Z M9.5 5 L9.5 19 M14.5 5 L14.5 19";
+    out property <string> fit: "M4 9 V4 H9 M15 4 H20 V9 M20 15 V20 H15 M9 20 H4 V15";
+    out property <string> minus: "M5 12 H19";
+    out property <string> save: "M5 4.5 H16 L19.5 8 V19.5 H4.5 V4.5 Z M8 4.5 V9 H15 V4.5 M8 19.5 V14 H16 V19.5";
+    out property <string> help: "M12 3.5 A8.5 8.5 0 1 0 12 20.5 A8.5 8.5 0 1 0 12 3.5 Z M9.6 9.6 A2.5 2.5 0 1 1 13.2 11.8 C12.4 12.2 12 12.8 12 13.6 V14.2 M12 16.9 V17.3";
+    out property <string> back: "M15 6 L9 12 L15 18";
+    out property <string> folder: "M3.5 6.5 A1 1 0 0 1 4.5 5.5 H9.5 L11.5 8 H19.5 A1 1 0 0 1 20.5 9 V17.5 A1 1 0 0 1 19.5 18.5 H4.5 A1 1 0 0 1 3.5 17.5 Z";
+
+    // 节点分类的图标：IO / 行 / 列 / 表达式 / 统计 / 变形 / 多表 / 代码
+    pure public function cat(i: int) -> string {
+        i == 0 ? "M5 6.5 C5 4 19 4 19 6.5 V17.5 C19 20 5 20 5 17.5 Z M5 6.5 C5 9 19 9 19 6.5 M5 12 C5 14.5 19 14.5 19 12"
+            : i == 1 ? "M4 5 H20 L14 12.5 V19 L10 17 V12.5 Z"
+            : i == 2 ? "M4 4.5 H20 V19.5 H4 Z M9.5 4.5 V19.5 M14.5 4.5 V19.5"
+            : i == 3 ? "M16 4.5 C13 4 12 5.5 11.5 8.5 L9.5 19.5 M7.5 10.5 H15 M14.5 13 L19.5 19 M19.5 13 L14.5 19"
+            : i == 4 ? "M17 5 H7 L13 12 L7 19 H17"
+            : i == 5 ? "M4 8 H18 M14 4 L18 8 L14 12 M20 16 H6 M10 12 L6 16 L10 20"
+            : i == 6 ? "M9 6.5 A5.5 5.5 0 1 0 9 17.5 A5.5 5.5 0 1 0 9 6.5 Z M15 6.5 A5.5 5.5 0 1 0 15 17.5 A5.5 5.5 0 1 0 15 6.5 Z"
+            : "M9 7 L4 12 L9 17 M15 7 L20 12 L15 17"
+    }
+}

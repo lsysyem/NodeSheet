@@ -1,0 +1,107 @@
+// 工具架（像 Houdini 的 shelf）：上面一排分类页签，下面是这一类的节点按钮，点一下在选中节点下面接一个。
+// 只是“添加”的快捷方式；自定义的节点类型按它的分类出现在对应的页签里。
+import { Theme, Icons, KindItem } from "theme.slint";
+
+export component Shelf inherits Rectangle {
+    in property <[string]> node-cats;
+    in property <[KindItem]> node-kinds;
+    in-out property <int> current;
+    callback add-node(int);
+    callback kind-help(int, length, length);   // 中键点了第几种：看帮助（鼠标在窗口里的位置）
+
+    height: 72px;
+    background: Theme.surface;
+
+    // 分类页签
+    Rectangle {
+        y: 0px;
+        height: 24px;
+        background: Theme.surface-alt;
+        HorizontalLayout {
+            padding-left: 6px;
+            alignment: start;
+            spacing: 1px;
+            for c[ci] in root.node-cats: Rectangle {
+                y: 3px;
+                height: 21px;
+                width: cat-txt.preferred-width + 24px;
+                border-radius: 3px;
+                background: ci == root.current ? Theme.surface : (cat-ta.has-hover ? Theme.hover : transparent);
+                // 当前页签上沿一道橙色
+                if ci == root.current: Rectangle {
+                    y: 0px;
+                    height: 2px;
+                    border-radius: 1px;
+                    background: Theme.focus;
+                }
+                cat-txt := Text {
+                    text: c;
+                    color: ci == root.current ? Theme.text : Theme.text-faint;
+                    font-size: 11.5px;
+                    font-weight: ci == root.current ? 600 : 400;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                cat-ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.current = ci; }
+                }
+            }
+        }
+    }
+
+    // 这一类的节点：图标在上、名字在下（不属于当前分类的宽度为 0，for 里不能套 if 过滤）
+    HorizontalLayout {
+        y: 24px;
+        height: 48px;
+        padding-left: 8px;
+        padding-right: 8px;
+        alignment: start;
+        for k[ki] in root.node-kinds: Rectangle {
+            visible: k.cat == root.current;
+            width: k.cat == root.current ? max(64px, tool-txt.preferred-width + 16px) : 0px;
+            Rectangle {
+                x: 1px;
+                y: 3px;
+                width: parent.width - 2px;
+                height: 42px;
+                border-radius: 4px;
+                background: tool-ta.pressed ? Theme.pressed : (tool-ta.has-hover ? Theme.hover : transparent);
+                Path {
+                    x: (parent.width - self.width) / 2;
+                    y: 5px;
+                    width: 18px;
+                    height: 18px;
+                    viewbox-width: 24;
+                    viewbox-height: 24;
+                    commands: Icons.cat(k.cat);
+                    stroke: Theme.cat(k.cat);
+                    stroke-width: 1.8px;
+                    stroke-line-cap: round;
+                    stroke-line-join: round;
+                    fill: transparent;
+                }
+                tool-txt := Text {
+                    y: 25px;
+                    height: 14px;
+                    text: k.name;
+                    color: Theme.text;
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                tool-ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.add-node(ki); }
+                    pointer-event(e) => {
+                        if (e.button == PointerEventButton.middle && e.kind == PointerEventKind.down) {
+                            root.kind-help(ki, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Rectangle { y: parent.height - 1px; height: 1px; background: Theme.edge; }
+}

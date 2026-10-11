@@ -1,0 +1,99 @@
+// 自己画的菜单栏：系统菜单（MenuBar）在深色主题下还是白的，换成跟着 Theme 走的。
+// 菜单栏上的标题点开一个 PopupWindow；快捷键在主窗口的 key-scope 里处理（这里只显示）。
+import { Theme } from "theme.slint";
+
+// 菜单栏上的一个标题
+export component MenuTitle inherits Rectangle {
+    in property <string> text;
+    in property <bool> open;
+    callback clicked();
+
+    width: txt.preferred-width + 20px;
+    border-radius: 3px;
+    background: root.open || ta.has-hover ? Theme.hover : transparent;
+    txt := Text {
+        text: root.text;
+        color: Theme.text;
+        font-size: 12.5px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// 下拉菜单的一项：左边勾（可勾选的项）、文字，右边快捷键
+export component MenuEntry inherits Rectangle {
+    in property <string> label;
+    in property <string> keys;
+    in property <bool> checked;
+    callback activated();
+
+    height: 28px;
+    border-radius: 3px;
+    background: ta.has-hover ? Theme.hover : transparent;
+    ta := TouchArea {
+        clicked => { root.activated(); }
+    }
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 12px;
+        spacing: 6px;
+        Rectangle {
+            width: 18px;
+            if root.checked: Path {
+                width: 12px;
+                height: 12px;
+                viewbox-width: 24;
+                viewbox-height: 24;
+                commands: "M5 12.5 L10 17.5 L19 7";
+                stroke: Theme.focus;
+                stroke-width: 3px;
+                stroke-line-cap: round;
+                stroke-line-join: round;
+                fill: transparent;
+            }
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: root.label;
+            color: Theme.text;
+            font-size: 12.5px;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.keys;
+            color: Theme.text-faint;
+            font-size: 11.5px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// 分隔线
+export component MenuSeparator2 inherits Rectangle {
+    height: 9px;
+    Rectangle {
+        x: 6px;
+        width: parent.width - 12px;
+        y: 4px;
+        height: 1px;
+        background: Theme.border-strong;
+    }
+}
+
+// 下拉菜单的底板
+export component MenuPanel inherits Rectangle {
+    background: Theme.pane-head;
+    border-width: 1px;
+    border-color: Theme.edge;
+    border-radius: 4px;
+    drop-shadow-blur: 14px;
+    drop-shadow-offset-y: 4px;
+    drop-shadow-color: Theme.shadow;
+    VerticalLayout {
+        padding: 4px;
+        @children
+    }
+}

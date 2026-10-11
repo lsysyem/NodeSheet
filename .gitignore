@@ -1,0 +1,7 @@
+/target
+/testdata/big.*
+drop_test.log
+/dist
+__pycache__/
+assets/icon-preview.png
+/testdata/big200k.ods

@@ -1,0 +1,1209 @@
+// 节点类型编辑器（像 Houdini 的 Type Properties / Edit Parameter Interface）：
+// 左边是参数类型（或已有节点上的参数），拖到中间的参数表里就加一个；中间拖动排序；右边改选中参数的属性。
+// 编辑的是 Rust 里的一份草稿，点“应用”才生效。状态都在全局 TypeEdit 上，Rust 直接读写它。
+import { Button, LineEdit, ComboBox, Switch, ListView, TextEdit } from "std-widgets.slint";
+import { Theme, Icons, CodeEdit } from "theme.slint";
+import { IconButton, Card, CodeEditor, CheckBox } from "widgets.slint";
+
+// 中间参数表的一行
+export struct EdParam {
+    name: string,
+    label: string,
+    kind: string,     // 类型的说明
+    kind-index: int,  // PARAM_KINDS 里的下标（左边的小标记）
+    unused: bool,     // 代码里没有 ch("名字") 用到它
+    mode: bool,       // 是节点的“方式”
+    required: bool,
+    cond: string,     // 显示条件（fiscal = True），空 = 总是显示；有的话这一行缩进
+}
+
+// 代码和参数的对照（代码页签右边的一项）
+export struct EdRef {
+    name: string,
+    state: int,       // 0 代码用到、有这个参数 / 1 代码用到、没有这个参数 / 2 有参数、代码没用到
+}
+
+// 选中参数的属性（0 或 1 个元素：换了选中的参数就整个换，输入框才会重新取值）
+export struct EdDetail {
+    name: string,
+    label: string,
+    kind: int,         // PARAM_KINDS 里的下标
+    default: string,
+    hint: string,
+    required: bool,
+    strip: bool,
+    options: string,   // 菜单选项，逗号分隔
+    option-list: [string], // 同上，拆开的（预览里画页签）
+    mode: bool,        // 菜单是节点的“方式”
+    show-param: int,   // 显示条件看哪个参数：0 = 总是显示，否则是 show-choices 里的下标
+    show-values: string,
+    insert: int,       // 选列写成：0 按类型 / 1 "列名" / 2 pl.col("列名") / 3 不选列
+    pick: int,         // 选列框怎么选：0 按类型 / 1 列名或选择器 / 2 只要列名 / 3 只要一列 / 4 不选列
+    pick-from: string, // 列取自第几个输入（从 1 数）
+    pick-dtype: bool,  // 键值对的值是数据类型
+    is-dict: bool,
+    is-menu: bool,
+    is-text: bool,
+}
+
+// 类型本身（0 或 1 个元素，同上）
+export struct EdType {
+    name: string,
+    category: string,
+    desc: string,
+    inputs: int,
+    min-inputs: int,
+    code: string,
+    help: string,
+}
+
+// 左边“来自节点”的一项：图里已有节点的某个参数
+export struct EdSource {
+    label: string,
+    detail: string,
+}
+
+export global TypeEdit {
+    in-out property <bool> open;
+    in property <string> title;
+    in property <string> note;           // 标题下面的说明（这是内置节点 / 只改这个节点…）
+    in property <string> error;
+    in property <string> message;
+    in property <bool> show-type;        // 显示名字 / 分类 / 说明 / 输入个数
+    in property <bool> show-code;        // 显示代码编辑框
+    in property <bool> can-delete;
+    in property <string> apply-label: "应用";
+    in property <[EdType]> type-detail;
+    in property <[EdParam]> params;
+    in property <int> selected: -1;
+    in property <[EdDetail]> detail;
+    in property <[string]> kind-names;
+    in property <[EdSource]> sources;
+    in property <[string]> show-choices;
+    in property <[string]> code-layers;
+    in-out property <int> tab: 1;        // 0 基本 / 1 参数 / 2 代码 / 3 帮助（show-type 时才有页签）
+    in property <[EdRef]> code-refs;
+    in property <string> missing;        // 代码用到、还没有的参数：ch("a")、ch("b")
+    in property <string> unused;         // 有、但代码没用到的参数：a、b
+
+    // 节点面板上的入口：选中节点时显示“参数界面 / 类型属性”，code 节点还有“存为节点类型”
+    in property <string> edit-label;
+    in property <bool> can-save;
+    callback edit-node();
+    callback save-node();
+    callback new-type();
+    callback open-folder();
+    callback reload-types();
+
+    callback add(int, int);       // 参数类型下标, 插到第几个
+    callback copy(int, int);      // “来自节点”的下标, 插到第几个
+    callback move(int, int);      // 从第几个, 挪到第几个（挪之前的位置算）
+    callback remove(int);
+    callback select(int);
+    callback field(string, string);   // 改了哪一项（t.xxx 类型 / p.xxx 选中的参数）, 新值
+    callback scan();              // 从代码里的 ch("…") 生成参数
+    callback apply();
+    callback cancel();
+    callback delete-type();
+    callback code-edited(string, int);
+    callback code-key(string, int, int, string) -> CodeEdit;
+    callback preview-help();      // 帮助页签：按草稿打开帮助窗口看看
+}
+
+// 右边属性表的一行：左边名字（右对齐），右边控件
+component Field inherits Rectangle {
+    in property <string> label;
+    min-height: row.min-height;
+    row := HorizontalLayout {
+        spacing: 10px;
+        Text {
+            width: 84px;
+            text: root.label;
+            color: Theme.text-muted;
+            font-size: 12px;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+        }
+        @children
+    }
+}
+
+// 属性表里分组的小标题
+component Section inherits Rectangle {
+    in property <string> text;
+    height: 22px;
+    Rectangle { y: 2px; height: 1px; background: Theme.border; }
+    Text {
+        x: 0px;
+        y: 6px;
+        width: parent.width;
+        text: root.text;
+        color: Theme.text-faint;
+        font-size: 11px;
+        font-weight: 600;
+    }
+}
+
+// 一栏的标题
+component Header inherits Text {
+    color: Theme.text;
+    font-size: 12px;
+    font-weight: 600;
+    height: 22px;
+    vertical-alignment: center;
+}
+
+export component TypeEditor inherits Rectangle {
+    // 拖动：从左边（参数类型 / 来自节点）或中间（排序）拖起
+    property <int> drag-source: 0;     // 1 参数类型 / 2 来自节点 / 3 中间的参数
+    property <int> drag-index;
+    property <string> drag-label;
+    property <bool> dragging: false;
+    property <length> drag-x;
+    property <length> drag-y;
+    property <int> left-tab: 0;        // 左边：0 按类型 / 1 来自节点
+
+    // 参数类型的小标记（顺序同 nodes.rs 的 PARAM_KINDS）
+    pure function kind-tag(i: int) -> string {
+        i == 0 ? "Aa" : i == 1 ? "123" : i == 2 ? "1.5" : i == 3 ? "on" : i == 4 ? "▼"
+            : i == 5 ? "col" : i == 6 ? "fx" : i == 7 ? "fx…" : i == 8 ? "{}" : i == 9 ? "k=v"
+            : i == 10 ? "in" : i == 11 ? "out" : i == 12 ? "sh" : i == 13 ? "</>" : "btn"
+    }
+    property <length> row-h: 34px;
+    // 中间参数表在编辑器里的位置
+    property <length> list-x: plist.absolute-position.x - root.absolute-position.x;
+    property <length> list-y: plist.absolute-position.y - root.absolute-position.y;
+    // 拖到中间参数表上的话，会插在第几个；不在表上是 -1
+    property <int> drop-at: !root.dragging || root.drag-x < root.list-x || root.drag-x > root.list-x + plist.width
+        || root.drag-y < root.list-y - 12px || root.drag-y > root.list-y + plist.height + 12px ? -1
+        : max(0, min(TypeEdit.params.length, round((root.drag-y - root.list-y - plist.content-y) / root.row-h)));
+
+    // 从某个 TouchArea 里拖动：x / y 是鼠标在编辑器里的位置
+    function drag-to(x: length, y: length) {
+        root.drag-x = x;
+        root.drag-y = y;
+        root.dragging = true;
+    }
+    function drop() {
+        if (root.dragging && root.drop-at >= 0) {
+            if (root.drag-source == 1) {
+                TypeEdit.add(root.drag-index, root.drop-at);
+            } else if (root.drag-source == 2) {
+                TypeEdit.copy(root.drag-index, root.drop-at);
+            } else if (root.drag-source == 3) {
+                TypeEdit.move(root.drag-index, root.drop-at);
+            }
+        }
+        root.dragging = false;
+        root.drag-source = 0;
+    }
+
+    visible: TypeEdit.open;
+    background: #00000060;
+
+    // 吃掉落在遮罩上的点击和滚轮
+    TouchArea {
+        scroll-event(e) => { accept }
+    }
+
+    card := Card {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: min(1040px, parent.width - 32px);
+        height: min(720px, parent.height - 32px);
+
+        VerticalLayout {
+            padding: 14px;
+            spacing: 10px;
+
+            // ---- 标题 + 按钮
+            HorizontalLayout {
+                spacing: 6px;
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    alignment: center;
+                    Text {
+                        text: TypeEdit.title;
+                        color: Theme.text;
+                        font-size: 15px;
+                        font-weight: 600;
+                        overflow: elide;
+                    }
+                    if TypeEdit.note != "": Text {
+                        text: TypeEdit.note;
+                        color: Theme.text-faint;
+                        font-size: 11px;
+                        overflow: elide;
+                    }
+                }
+                IconButton {
+                    label: "从代码生成参数";
+                    clicked => { TypeEdit.scan(); }
+                }
+                if TypeEdit.can-delete: IconButton {
+                    icon: Icons.close;
+                    label: "删除这个类型";
+                    clicked => { TypeEdit.delete-type(); }
+                }
+                Button {
+                    text: "取消";
+                    clicked => { TypeEdit.cancel(); }
+                }
+                Button {
+                    text: TypeEdit.apply-label;
+                    primary: true;
+                    clicked => { TypeEdit.apply(); }
+                }
+            }
+
+            // ---- 页签：基本 / 参数 / 代码 / 帮助（只改节点自己的参数界面时只有参数，不显示页签）
+            if TypeEdit.show-type: Rectangle {
+                height: 30px;
+                HorizontalLayout {
+                    alignment: start;
+                    spacing: 2px;
+                    for tab[ti] in ["基本", "参数", "代码", "帮助"]: Rectangle {
+                        width: tab-txt.preferred-width + 32px;
+                        border-radius: 6px;
+                        background: ti == TypeEdit.tab ? Theme.accent-soft : (tab-ta.has-hover ? Theme.hover : transparent);
+                        tab-txt := Text {
+                            text: ti == 1 ? tab + " " + TypeEdit.params.length : tab;
+                            color: ti == TypeEdit.tab ? Theme.accent : Theme.text-muted;
+                            font-size: 13px;
+                            font-weight: ti == TypeEdit.tab ? 600 : 400;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        // 代码和参数对不上：参数、代码页签上一个小点
+                        if (ti == 1 || ti == 2) && (TypeEdit.missing != "" || TypeEdit.unused != ""): Rectangle {
+                            x: parent.width - 9px;
+                            y: 6px;
+                            width: 6px;
+                            height: 6px;
+                            border-radius: 3px;
+                            background: TypeEdit.missing != "" ? Theme.danger : Theme.warn;
+                        }
+                        tab-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { TypeEdit.tab = ti; }
+                        }
+                    }
+                }
+                Rectangle { y: parent.height - 1px; height: 1px; background: Theme.border; }
+            }
+
+            // 几页叠在一起、只显示当前页（不用 if：切页签时代码框和输入框里改了的内容要留着）
+            pages := Rectangle {
+                vertical-stretch: 1;
+
+                // ---- 基本：类型名、分类、说明、输入个数
+                if TypeEdit.show-type: Rectangle {
+                    visible: TypeEdit.tab == 0;
+                    for t in TypeEdit.type-detail: VerticalLayout {
+                        alignment: start;
+                        spacing: 10px;
+                        padding-top: 6px;
+                        Field {
+                            label: "类型名";
+                            LineEdit {
+                                width: 220px;
+                                text: t.name;
+                                placeholder-text: "字母、数字、下划线";
+                                edited(text) => { TypeEdit.field("t.name", text); }
+                            }
+                            Text {
+                                text: "也是定义文件的名字（名字.py）";
+                                color: Theme.text-faint;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+                        }
+                        Field {
+                            label: "分类";
+                            LineEdit {
+                                width: 220px;
+                                text: t.category;
+                                edited(text) => { TypeEdit.field("t.category", text); }
+                            }
+                            Text {
+                                text: "决定在“添加”菜单的哪一组；写个新名字就是新的一组";
+                                color: Theme.text-faint;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+                        }
+                        Field {
+                            label: "说明";
+                            LineEdit {
+                                horizontal-stretch: 1;
+                                text: t.desc;
+                                placeholder-text: "添加菜单和节点卡片上显示";
+                                edited(text) => { TypeEdit.field("t.desc", text); }
+                            }
+                        }
+                        Field {
+                            label: "输入";
+                            ComboBox {
+                                width: 72px;
+                                model: ["0", "1", "2", "3", "4"];
+                                current-index: t.inputs;
+                                selected(value) => { TypeEdit.field("t.inputs", value); }
+                            }
+                            Text {
+                                text: "必连";
+                                color: Theme.text-muted;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+                            ComboBox {
+                                width: 72px;
+                                model: ["0", "1", "2", "3", "4"];
+                                current-index: t.min-inputs;
+                                selected(value) => { TypeEdit.field("t.min_inputs", value); }
+                            }
+                            Text {
+                                text: "代码里 df ~ df4 是第 1 ~ 4 个输入，没连的是 None";
+                                color: Theme.text-faint;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+                            // 占位：这一行里都是定宽控件时，整列的最大宽度会被它卡住
+                            Rectangle {}
+                        }
+                    }
+                }
+
+                // ---- 参数：三栏 + 底下和代码的对照
+                Rectangle {
+                    visible: !TypeEdit.show-type || TypeEdit.tab == 1;
+                    VerticalLayout {
+                        spacing: 8px;
+                        // ---- 三栏：参数类型 | 现有参数 | 属性
+                        HorizontalLayout {
+                            vertical-stretch: 1;
+                            spacing: 12px;
+
+                            // 左：拖到中间去
+                            VerticalLayout {
+                                width: 200px;
+                                spacing: 6px;
+                                Rectangle {
+                                    height: 28px;
+                                    border-radius: 6px;
+                                    background: Theme.chip-bg;
+                                    HorizontalLayout {
+                                        padding: 2px;
+                                        spacing: 2px;
+                                        for tab[ti] in ["按类型", "来自节点"]: Rectangle {
+                                            border-radius: 5px;
+                                            background: ti == root.left-tab ? Theme.surface : transparent;
+                                            Text {
+                                                text: tab;
+                                                color: ti == root.left-tab ? Theme.accent : Theme.text-muted;
+                                                font-size: 12px;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                            TouchArea {
+                                                mouse-cursor: pointer;
+                                                clicked => { root.left-tab = ti; }
+                                            }
+                                        }
+                                    }
+                                }
+                                Rectangle {
+                                    vertical-stretch: 1;
+                                    border-radius: 6px;
+                                    border-width: 1px;
+                                    border-color: Theme.border;
+                                    clip: true;
+
+                                    if root.left-tab == 0: ListView {
+                                        for k[ki] in TypeEdit.kind-names: Rectangle {
+                                            height: 30px;
+                                            background: kind-ta.has-hover ? Theme.hover : transparent;
+                                            HorizontalLayout {
+                                                padding-left: 8px;
+                                                spacing: 8px;
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    Rectangle {
+                                                        width: 30px;
+                                                        height: 18px;
+                                                        border-radius: 3px;
+                                                        border-width: 1px;
+                                                        border-color: Theme.border-strong;
+                                                        background: Theme.field;
+                                                        Text {
+                                                            text: root.kind-tag(ki);
+                                                            color: Theme.text-muted;
+                                                            font-family: "Consolas";
+                                                            font-size: 10px;
+                                                            horizontal-alignment: center;
+                                                            vertical-alignment: center;
+                                                        }
+                                                    }
+                                                }
+                                                Text {
+                                                    text: k;
+                                                    color: Theme.text;
+                                                    font-size: 12.5px;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                            kind-ta := TouchArea {
+                                                mouse-cursor: pointer;
+                                                // 点一下 = 加到最后；拖到中间 = 插在那里
+                                                clicked => {
+                                                    if (!root.dragging) {
+                                                        TypeEdit.add(ki, TypeEdit.params.length);
+                                                    }
+                                                }
+                                                moved => {
+                                                    if (self.pressed && (root.dragging || abs(self.mouse-x - self.pressed-x) > 5px
+                                                        || abs(self.mouse-y - self.pressed-y) > 5px)) {
+                                                        root.drag-source = 1;
+                                                        root.drag-index = ki;
+                                                        root.drag-label = k;
+                                                        root.drag-to(self.absolute-position.x - root.absolute-position.x + self.mouse-x,
+                                                            self.absolute-position.y - root.absolute-position.y + self.mouse-y);
+                                                    }
+                                                }
+                                                pointer-event(e) => {
+                                                    if (e.kind == PointerEventKind.up && root.dragging) {
+                                                        root.drop();
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    if root.left-tab == 1: ListView {
+                                        for src[si] in TypeEdit.sources: Rectangle {
+                                            height: 38px;
+                                            background: src-ta.has-hover ? Theme.hover : transparent;
+                                            VerticalLayout {
+                                                padding-left: 10px;
+                                                padding-right: 8px;
+                                                alignment: center;
+                                                Text {
+                                                    text: src.label;
+                                                    color: Theme.text;
+                                                    font-size: 12.5px;
+                                                    overflow: elide;
+                                                }
+                                                Text {
+                                                    text: src.detail;
+                                                    color: Theme.text-faint;
+                                                    font-size: 10.5px;
+                                                    overflow: elide;
+                                                }
+                                            }
+                                            src-ta := TouchArea {
+                                                mouse-cursor: pointer;
+                                                clicked => {
+                                                    if (!root.dragging) {
+                                                        TypeEdit.copy(si, TypeEdit.params.length);
+                                                    }
+                                                }
+                                                moved => {
+                                                    if (self.pressed && (root.dragging || abs(self.mouse-x - self.pressed-x) > 5px
+                                                        || abs(self.mouse-y - self.pressed-y) > 5px)) {
+                                                        root.drag-source = 2;
+                                                        root.drag-index = si;
+                                                        root.drag-label = src.label;
+                                                        root.drag-to(self.absolute-position.x - root.absolute-position.x + self.mouse-x,
+                                                            self.absolute-position.y - root.absolute-position.y + self.mouse-y);
+                                                    }
+                                                }
+                                                pointer-event(e) => {
+                                                    if (e.kind == PointerEventKind.up && root.dragging) {
+                                                        root.drop();
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if root.left-tab == 1 && TypeEdit.sources.length == 0: Text {
+                                        text: "图里还没有别的节点";
+                                        color: Theme.text-faint;
+                                        font-size: 12px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                Text {
+                                    text: "点一下加到最后，或拖到中间";
+                                    color: Theme.text-faint;
+                                    font-size: 11px;
+                                }
+                            }
+
+                            // 中：现有参数（拖动排序）
+                            VerticalLayout {
+                                width: 300px;
+                                spacing: 6px;
+                                Header {
+                                    text: "参数（" + TypeEdit.params.length + "）";
+                                }
+                                Rectangle {
+                                    vertical-stretch: 1;
+                                    border-radius: 6px;
+                                    border-width: 1px;
+                                    border-color: root.drop-at >= 0 ? Theme.accent : Theme.border;
+                                    background: root.drop-at >= 0 ? Theme.accent-soft.transparentize(0.5) : transparent;
+                                    clip: true;
+
+                                    plist := ListView {
+                                        for p[pi] in TypeEdit.params: Rectangle {
+                                            height: root.row-h;
+                                            background: pi == TypeEdit.selected ? Theme.hover
+                                                : (row-ta.has-hover ? Theme.hover : transparent);
+                                            // 选中：左边一道橙色
+                                            if pi == TypeEdit.selected: Rectangle {
+                                                x: 0px;
+                                                width: 3px;
+                                                background: Theme.focus;
+                                            }
+                                            row-ta := TouchArea {
+                                                clicked => {
+                                                    if (!root.dragging) {
+                                                        TypeEdit.select(pi);
+                                                    }
+                                                }
+                                                moved => {
+                                                    if (self.pressed && (root.dragging || abs(self.mouse-y - self.pressed-y) > 5px)) {
+                                                        root.drag-source = 3;
+                                                        root.drag-index = pi;
+                                                        root.drag-label = p.label;
+                                                        root.drag-to(self.absolute-position.x - root.absolute-position.x + self.mouse-x,
+                                                            self.absolute-position.y - root.absolute-position.y + self.mouse-y);
+                                                    }
+                                                }
+                                                pointer-event(e) => {
+                                                    if (e.kind == PointerEventKind.up && root.dragging) {
+                                                        root.drop();
+                                                    }
+                                                }
+                                            }
+                                            HorizontalLayout {
+                                                // 有显示条件的参数缩进，挂在它依赖的参数下面
+                                                padding-left: p.cond != "" ? 24px : 10px;
+                                                padding-right: 4px;
+                                                spacing: 6px;
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    Rectangle {
+                                                        width: 30px;
+                                                        height: 18px;
+                                                        border-radius: 3px;
+                                                        border-width: 1px;
+                                                        border-color: Theme.border-strong;
+                                                        background: Theme.field;
+                                                        Text {
+                                                            text: root.kind-tag(p.kind-index);
+                                                            color: Theme.text-muted;
+                                                            font-family: "Consolas";
+                                                            font-size: 10px;
+                                                            horizontal-alignment: center;
+                                                            vertical-alignment: center;
+                                                        }
+                                                    }
+                                                }
+                                                VerticalLayout {
+                                                    horizontal-stretch: 1;
+                                                    alignment: center;
+                                                    Text {
+                                                        text: p.label;
+                                                        color: pi == TypeEdit.selected ? Theme.select : Theme.text;
+                                                        font-size: 12.5px;
+                                                        font-weight: 600;
+                                                        overflow: elide;
+                                                    }
+                                                    Text {
+                                                        text: p.name + " · " + p.kind;
+                                                        color: Theme.text-faint;
+                                                        font-size: 10.5px;
+                                                        overflow: elide;
+                                                    }
+                                                }
+                                                if p.mode: VerticalLayout {
+                                                    alignment: center;
+                                                    Rectangle {
+                                                        height: 16px;
+                                                        width: mode-txt.preferred-width + 12px;
+                                                        border-radius: 8px;
+                                                        background: Theme.focus.transparentize(0.75);
+                                                        mode-txt := Text {
+                                                            text: "方式";
+                                                            color: Theme.text;
+                                                            font-size: 10.5px;
+                                                            horizontal-alignment: center;
+                                                            vertical-alignment: center;
+                                                        }
+                                                    }
+                                                }
+                                                if p.cond != "": VerticalLayout {
+                                                    alignment: center;
+                                                    Rectangle {
+                                                        height: 16px;
+                                                        width: min(cond-txt.preferred-width + 12px, 110px);
+                                                        border-radius: 8px;
+                                                        background: Theme.accent-soft;
+                                                        cond-txt := Text {
+                                                            width: parent.width - 8px;
+                                                            text: p.cond;
+                                                            color: Theme.text;
+                                                            font-size: 10.5px;
+                                                            overflow: elide;
+                                                            horizontal-alignment: center;
+                                                            vertical-alignment: center;
+                                                        }
+                                                    }
+                                                }
+                                                if p.unused: VerticalLayout {
+                                                    alignment: center;
+                                                    Rectangle {
+                                                        height: 16px;
+                                                        width: unused-txt.preferred-width + 12px;
+                                                        border-radius: 8px;
+                                                        background: Theme.warn.transparentize(0.8);
+                                                        unused-txt := Text {
+                                                            text: "代码没用到";
+                                                            color: Theme.text;
+                                                            font-size: 10.5px;
+                                                            horizontal-alignment: center;
+                                                            vertical-alignment: center;
+                                                        }
+                                                    }
+                                                }
+                                                if row-ta.has-hover || pi == TypeEdit.selected: IconButton {
+                                                    icon: Icons.close;
+                                                    clicked => { TypeEdit.remove(pi); }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if TypeEdit.params.length == 0: Text {
+                                        text: "从左边拖参数类型进来";
+                                        color: Theme.text-faint;
+                                        font-size: 12px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    // 松手会插在这里
+                                    if root.drop-at >= 0: Rectangle {
+                                        x: 4px;
+                                        y: root.drop-at * root.row-h + plist.content-y - 1px;
+                                        width: parent.width - 8px;
+                                        height: 2px;
+                                        background: Theme.accent;
+                                    }
+                                }
+                            }
+
+                            // 右：选中参数的属性
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                spacing: 6px;
+                                Header {
+                                    text: TypeEdit.detail.length == 0 ? "属性" : "属性：" + TypeEdit.detail[0].label;
+                                }
+                                if TypeEdit.detail.length == 0: Rectangle {
+                                    vertical-stretch: 1;
+                                    Text {
+                                        text: "选中一个参数，在这里改它的名字、类型、默认值、显示条件";
+                                        color: Theme.text-faint;
+                                        font-size: 12px;
+                                        wrap: word-wrap;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                for d in TypeEdit.detail: VerticalLayout {
+                                    vertical-stretch: 1;
+                                    alignment: start;
+                                    spacing: 6px;
+                                    Field {
+                                        label: "名字";
+                                        LineEdit {
+                                            horizontal-stretch: 1;
+                                            text: d.name;
+                                            placeholder-text: "代码里用 ch(\"名字\") 取值";
+                                            edited(text) => { TypeEdit.field("p.name", text); }
+                                        }
+                                    }
+                                    Field {
+                                        label: "标签";
+                                        LineEdit {
+                                            horizontal-stretch: 1;
+                                            text: d.label;
+                                            placeholder-text: "面板上显示的名字";
+                                            edited(text) => { TypeEdit.field("p.label", text); }
+                                        }
+                                    }
+                                    Field {
+                                        label: "类型";
+                                        ComboBox {
+                                            horizontal-stretch: 1;
+                                            model: TypeEdit.kind-names;
+                                            current-index: d.kind;
+                                            selected(value) => { TypeEdit.field("p.kind", "" + self.current-index); }
+                                        }
+                                    }
+                                    Field {
+                                        label: "默认值";
+                                        LineEdit {
+                                            horizontal-stretch: 1;
+                                            text: d.default;
+                                            edited(text) => { TypeEdit.field("p.default", text); }
+                                        }
+                                    }
+                                    Field {
+                                        label: "提示";
+                                        LineEdit {
+                                            horizontal-stretch: 1;
+                                            text: d.hint;
+                                            placeholder-text: "输入框里的灰字 / 开关旁边的说明";
+                                            edited(text) => { TypeEdit.field("p.hint", text); }
+                                        }
+                                    }
+                                    if d.is-menu: Field {
+                                        label: "选项";
+                                        LineEdit {
+                                            horizontal-stretch: 1;
+                                            text: d.options;
+                                            placeholder-text: "逗号分隔：head, tail, sample";
+                                            edited(text) => { TypeEdit.field("p.options", text); }
+                                        }
+                                    }
+                                    Section { text: "行为"; }
+                                    Field {
+                                        label: "必填";
+                                        CheckBox {
+                                            horizontal-stretch: 1;
+                                            text: "没填不运行，提示用户填写";
+                                            checked: d.required;
+                                            toggled(on) => { TypeEdit.field("p.required", on ? "True" : "False"); }
+                                        }
+                                    }
+                                    if d.is-menu: Field {
+                                        label: "方式";
+                                        CheckBox {
+                                            horizontal-stretch: 1;
+                                            text: "节点的“方式”：选项 ≤ 5 个画成页签，Tab 菜单搜得到";
+                                            checked: d.mode;
+                                            toggled(on) => { TypeEdit.field("p.mode", on ? "True" : "False"); }
+                                        }
+                                    }
+                                    if d.is-text: Field {
+                                        label: "去空白";
+                                        CheckBox {
+                                            horizontal-stretch: 1;
+                                            text: "传给代码前去掉首尾空白（分隔符这类要关掉）";
+                                            checked: d.strip;
+                                            toggled(on) => { TypeEdit.field("p.strip", on ? "True" : "False"); }
+                                        }
+                                    }
+                                    Section { text: "显示条件"; }
+                                    Field {
+                                        label: "只在";
+                                        ComboBox {
+                                            width: 150px;
+                                            model: TypeEdit.show-choices;
+                                            current-index: d.show-param;
+                                            selected(value) => { TypeEdit.field("p.show_param", "" + self.current-index); }
+                                        }
+                                        if d.show-param > 0: Text {
+                                            text: "是";
+                                            color: Theme.text-muted;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                        }
+                                        if d.show-param > 0: LineEdit {
+                                            horizontal-stretch: 1;
+                                            text: d.show-values;
+                                            placeholder-text: "这些值之一（逗号分隔；开关写 True / False）";
+                                            edited(text) => { TypeEdit.field("p.show_values", text); }
+                                        }
+                                        if d.show-param > 0: Text {
+                                            text: "时显示";
+                                            color: Theme.text-muted;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                        }
+                                        if d.show-param == 0: Text {
+                                            horizontal-stretch: 1;
+                                            text: "选一个参数：它是某些值时才显示这一个";
+                                            color: Theme.text-faint;
+                                            font-size: 11.5px;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    Section { text: "选列（参数旁边的“选列”按钮）"; }
+                                    Field {
+                                        label: "写成";
+                                        Rectangle {
+                                            horizontal-stretch: 1;
+                                            height: 26px;
+                                            border-radius: 4px;
+                                            border-width: 1px;
+                                            border-color: Theme.border-strong;
+                                            background: Theme.field;
+                                            HorizontalLayout {
+                                                padding: 2px;
+                                                spacing: 2px;
+                                                for opt[oi] in ["按类型", "\"列名\"", "pl.col(…)", "不选列"]: Rectangle {
+                                                    horizontal-stretch: 1;
+                                                    border-radius: 3px;
+                                                    background: oi == d.insert ? Theme.hover : (ins-ta.has-hover ? Theme.surface-alt : transparent);
+                                                    Text {
+                                                        text: opt;
+                                                        color: oi == d.insert ? Theme.text : Theme.text-faint;
+                                                        font-size: 11.5px;
+                                                        font-weight: oi == d.insert ? 600 : 400;
+                                                        horizontal-alignment: center;
+                                                        vertical-alignment: center;
+                                                    }
+                                                    ins-ta := TouchArea {
+                                                        mouse-cursor: pointer;
+                                                        clicked => { TypeEdit.field("p.insert", "" + oi); }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Field {
+                                        label: "怎么选";
+                                    Rectangle {
+                                            horizontal-stretch: 1;
+                                            height: 26px;
+                                            border-radius: 4px;
+                                            border-width: 1px;
+                                            border-color: Theme.border-strong;
+                                            background: Theme.field;
+                                            HorizontalLayout {
+                                                padding: 2px;
+                                                spacing: 2px;
+                                                for opt[oi] in ["按类型", "列名或选择器", "只要列名", "只要一列", "不选列"]: Rectangle {
+                                                    horizontal-stretch: 1;
+                                                    border-radius: 3px;
+                                                    background: oi == d.pick ? Theme.hover : (seg-ta.has-hover ? Theme.surface-alt : transparent);
+                                                    Text {
+                                                        text: opt;
+                                                        color: oi == d.pick ? Theme.text : Theme.text-faint;
+                                                        font-size: 11.5px;
+                                                        font-weight: oi == d.pick ? 600 : 400;
+                                                        horizontal-alignment: center;
+                                                        vertical-alignment: center;
+                                                    }
+                                                    seg-ta := TouchArea {
+                                                        mouse-cursor: pointer;
+                                                        clicked => { TypeEdit.field("p.pick", "" + oi); }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Field {
+                                        label: "列取自";
+                                        LineEdit {
+                                            width: 60px;
+                                            text: d.pick-from;
+                                            placeholder-text: "1";
+                                            edited(text) => { TypeEdit.field("p.pick_from", text); }
+                                        }
+                                        Text {
+                                            horizontal-stretch: 1;
+                                            text: "第几个输入的列（从 1 数）；没有输入的节点列自己的列";
+                                            color: Theme.text-faint;
+                                            font-size: 11.5px;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    if d.is-dict: Field {
+                                        label: "值";
+                                        CheckBox {
+                                            text: "值是数据类型（选列框里值的旁边有类型下拉）";
+                                            checked: d.pick-dtype;
+                                            toggled(on) => { TypeEdit.field("p.pick_dtype", on ? "True" : "False"); }
+                                        }
+                                    }
+
+                                    // 这个参数在参数面板上会是什么样
+                                    Section { text: "参数面板上的样子"; }
+                                    Rectangle {
+                                        border-radius: 3px;
+                                        border-width: 1px;
+                                        border-color: Theme.border-strong;
+                                        background: Theme.param-bg;
+                                        HorizontalLayout {
+                                            padding: 10px;
+                                            spacing: 10px;
+                                            Text {
+                                                width: 84px;
+                                                text: d.label;
+                                                color: Theme.text-muted;
+                                                font-size: 12px;
+                                                overflow: elide;
+                                                horizontal-alignment: right;
+                                                vertical-alignment: center;
+                                            }
+                                            if d.kind == 3: CheckBox {
+                                                horizontal-stretch: 1;
+                                                text: d.hint;
+                                                checked: d.default == "True";
+                                            }
+                                            if d.kind == 14: Rectangle {
+                                                horizontal-stretch: 1;
+                                                height: 26px;
+                                                border-radius: 4px;
+                                                background: Theme.accent;
+                                                Text {
+                                                    text: d.label;
+                                                    color: Theme.on-accent;
+                                                    font-size: 12px;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                            if d.kind == 4 && d.mode: HorizontalLayout {
+                                                horizontal-stretch: 1;
+                                                alignment: start;
+                                                spacing: 2px;
+                                                for o[oi] in d.option-list: Rectangle {
+                                                    height: 24px;
+                                                    width: opt-txt.preferred-width + 22px;
+                                                    border-radius: 4px;
+                                                    border-width: o == d.default ? 1px : 0px;
+                                                    border-color: Theme.border-strong;
+                                                    background: o == d.default ? Theme.param-bg : Theme.surface-alt;
+                                                    opt-txt := Text {
+                                                        text: o;
+                                                        color: o == d.default ? Theme.text : Theme.text-faint;
+                                                        font-size: 12px;
+                                                        horizontal-alignment: center;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
+                                            }
+                                            if d.kind != 3 && d.kind != 14 && !(d.kind == 4 && d.mode): Rectangle {
+                                                horizontal-stretch: 1;
+                                                height: 26px;
+                                                border-radius: 3px;
+                                                border-width: 1px;
+                                                border-color: Theme.border-strong;
+                                                background: Theme.field;
+                                                Text {
+                                                    x: 8px;
+                                                    width: parent.width - 16px;
+                                                    text: d.default != "" ? d.default : d.hint;
+                                                    color: d.default != "" ? Theme.text : Theme.text-faint;
+                                                    font-size: 12px;
+                                                    overflow: elide;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // 代码里用到、还没有的参数 / 有、但代码没用到的参数
+                        if TypeEdit.missing != "" || TypeEdit.unused != "": Rectangle {
+                            height: 32px;
+                            border-radius: 6px;
+                            background: TypeEdit.missing != "" ? Theme.danger.transparentize(0.9) : Theme.warn.transparentize(0.86);
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 4px;
+                                spacing: 8px;
+                                if TypeEdit.missing != "": Text {
+                                    text: "代码里的 " + TypeEdit.missing + " 还没有对应参数";
+                                    color: Theme.text;
+                                    font-size: 12px;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                }
+                                if TypeEdit.missing != "": VerticalLayout {
+                                    alignment: center;
+                                    IconButton {
+                                        icon: Icons.plus;
+                                        label: "补上";
+                                        clicked => { TypeEdit.scan(); }
+                                    }
+                                }
+                                if TypeEdit.unused != "": Text {
+                                    text: (TypeEdit.missing != "" ? "· " : "") + "参数 " + TypeEdit.unused + " 代码没用到";
+                                    color: Theme.text-muted;
+                                    font-size: 12px;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                        }
+                    }
+                }
+
+                // ---- 代码 + 右边对照：代码用到了哪些参数
+                if TypeEdit.show-code: Rectangle {
+                    visible: TypeEdit.tab == 2;
+                    for t in TypeEdit.type-detail: HorizontalLayout {
+                        spacing: 10px;
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 4px;
+                            Text {
+                                text: "df ~ df4 是输入，ch(\"名字\") 取参数，结果赋给 out；按钮被点时 action 是按钮的名字";
+                                color: Theme.text-muted;
+                                font-size: 12px;
+                            }
+                            CodeEditor {
+                                vertical-stretch: 1;
+                                value: t.code;
+                                layers: TypeEdit.code-layers;
+                                item-count: 0;
+                                edited(text, cursor) => { TypeEdit.code-edited(text, cursor); }
+                                key(text, anchor, cursor, name) => { return TypeEdit.code-key(text, anchor, cursor, name); }
+                                accept(text, cursor, pick) => { return { text: text, cursor: cursor }; }
+                            }
+                        }
+                        VerticalLayout {
+                            width: 190px;
+                            spacing: 4px;
+                            Header {
+                                text: "用到的参数";
+                            }
+                            Rectangle {
+                                vertical-stretch: 1;
+                                border-radius: 6px;
+                                border-width: 1px;
+                                border-color: Theme.border;
+                                clip: true;
+                                ListView {
+                                    for r in TypeEdit.code-refs: Rectangle {
+                                        height: 26px;
+                                        HorizontalLayout {
+                                            padding-left: 10px;
+                                            padding-right: 8px;
+                                            spacing: 6px;
+                                            // 对勾：有这个参数 / 加号：缺参数 / 横线：没用到（字体里不一定有 ✓，自己画）
+                                            VerticalLayout {
+                                                alignment: center;
+                                                Path {
+                                                    width: 12px;
+                                                    height: 12px;
+                                                    viewbox-width: 24;
+                                                    viewbox-height: 24;
+                                                    commands: r.state == 0 ? "M5 12.5 L10 17.5 L19 7"
+                                                        : (r.state == 1 ? "M12 5 V19 M5 12 H19" : "M8 12 H16");
+                                                    stroke: r.state == 0 ? Theme.cat(0) : (r.state == 1 ? Theme.danger : Theme.text-faint);
+                                                    stroke-width: 3px;
+                                                    stroke-line-cap: round;
+                                                    stroke-line-join: round;
+                                                    fill: transparent;
+                                                }
+                                            }
+                                            Text {
+                                                horizontal-stretch: 1;
+                                                text: r.name;
+                                                color: r.state == 2 ? Theme.text-faint : Theme.text;
+                                                font-family: "Consolas";
+                                                font-size: 12px;
+                                                overflow: elide;
+                                                vertical-alignment: center;
+                                            }
+                                            Text {
+                                                text: r.state == 1 ? "没有参数" : (r.state == 2 ? "没用到" : "");
+                                                color: r.state == 1 ? Theme.danger : Theme.text-faint;
+                                                font-size: 11px;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                }
+                                if TypeEdit.code-refs.length == 0: Text {
+                                    text: "代码里还没有 ch(\"…\")";
+                                    color: Theme.text-faint;
+                                    font-size: 12px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            if TypeEdit.missing != "": Button {
+                                text: "补上缺的参数";
+                                clicked => { TypeEdit.scan(); }
+                            }
+                        }
+                    }
+                }
+
+                // ---- 帮助：中键点节点、F1 看到的说明（格式像 Houdini 的帮助）
+                if TypeEdit.show-type: Rectangle {
+                    visible: TypeEdit.tab == 3;
+                    for t in TypeEdit.type-detail: HorizontalLayout {
+                        spacing: 10px;
+                        TextEdit {
+                            horizontal-stretch: 1;
+                            text: t.help;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                            edited(text) => { TypeEdit.field("t.help", text); }
+                        }
+                        VerticalLayout {
+                            width: 250px;
+                            spacing: 8px;
+                            Header {
+                                text: "写法";
+                            }
+                            Text {
+                                text: "开头几段是概述，空行分段\n== 标题 == 小标题\n* 列表项\n{{{ 到 }}} 之间是代码\n\n@parameters\n参数名:\n    缩进写它的说明\n\n@inputs\n1:\n    第一个输入的说明\n\n@examples\n例子（写法同概述）\n\n@related\n相关节点的类型名, 逗号分隔\n\n@polars\nDataFrame.unique\n方式的选项: DataFrame.xxx\n（帮助里附上 polars 的英文文档）";
+                                color: Theme.text-muted;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                            Text {
+                                text: "没写说明的参数用它的“提示”；参数一节总会列出全部参数。";
+                                color: Theme.text-faint;
+                                font-size: 11.5px;
+                                wrap: word-wrap;
+                            }
+                            Button {
+                                text: "预览帮助";
+                                clicked => { TypeEdit.preview-help(); }
+                            }
+                            Rectangle { vertical-stretch: 1; }
+                        }
+                    }
+                }
+            }
+
+            if TypeEdit.error != "" || TypeEdit.message != "": Text {
+                text: TypeEdit.error != "" ? TypeEdit.error : TypeEdit.message;
+                color: TypeEdit.error != "" ? Theme.danger : Theme.text-muted;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+        }
+    }
+
+    // 拖动中：跟着鼠标的标签
+    if root.dragging: Rectangle {
+        x: root.drag-x + 12px;
+        y: root.drag-y - 12px;
+        width: ghost.preferred-width + 20px;
+        height: 26px;
+        border-radius: 6px;
+        background: Theme.accent;
+        ghost := Text {
+            text: root.drop-at >= 0 ? root.drag-label + "  →  第 " + (root.drop-at + 1) + " 个" : root.drag-label;
+            color: Theme.on-accent;
+            font-size: 12px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}

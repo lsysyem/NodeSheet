@@ -1,0 +1,359 @@
+// 小组件：按钮、浮层卡片、菜单行、代码编辑框。
+import { ScrollView } from "std-widgets.slint";
+import { Theme, CodeEdit } from "theme.slint";
+
+// 工具栏幽灵按钮：图标 + 文字，active 为开启态高亮
+export component IconButton inherits Rectangle {
+    in property <string> icon;
+    in property <string> label;
+    in property <string> keys;      // 文字后面淡淡的快捷键提示
+    in property <bool> active;
+    in property <bool> small;       // 路径栏里的小号按钮
+    callback clicked();
+
+    property <color> fg: root.active ? Theme.accent : Theme.text-muted;
+
+    height: root.small ? 22px : 30px;
+    min-width: row.preferred-width;
+    horizontal-stretch: 0;
+    border-radius: root.small ? 3px : 6px;
+    background: root.active ? Theme.accent-soft
+        : (ta.pressed ? Theme.pressed : (ta.has-hover ? Theme.hover : transparent));
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    row := HorizontalLayout {
+        padding-left: root.icon == "" ? 10px : (root.small ? 6px : 8px);
+        padding-right: root.label == "" ? (root.small ? 6px : 8px) : (root.small ? 8px : 10px);
+        spacing: root.small ? 5px : 6px;
+
+        if root.icon != "": VerticalLayout {
+            alignment: center;
+            Path {
+                width: root.small ? 13px : 16px;
+                height: root.small ? 13px : 16px;
+                viewbox-width: 24;
+                viewbox-height: 24;
+                commands: root.icon;
+                stroke: ta.has-hover && !root.active ? Theme.text : root.fg;
+                stroke-width: 1.8px;
+                stroke-line-cap: round;
+                fill: transparent;
+            }
+        }
+
+        if root.label != "": Text {
+            text: root.label;
+            color: ta.has-hover && !root.active ? Theme.text : root.fg;
+            font-size: root.small ? 12px : 13px;
+            vertical-alignment: center;
+        }
+        if root.keys != "": Text {
+            text: root.keys;
+            color: Theme.text-faint;
+            font-size: 10.5px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// 面板顶上的页签条（像 Houdini 的 pane tab）：tabs 是页签名，current 是当前页
+export component PaneTabs inherits Rectangle {
+    in property <[string]> tabs;
+    in-out property <int> current;
+    callback picked(int);
+
+    height: 26px;
+    background: Theme.surface-alt;
+
+    HorizontalLayout {
+        padding-left: 4px;
+        padding-top: 3px;
+        alignment: start;
+        spacing: 1px;
+
+        for t[ti] in root.tabs: Rectangle {
+            width: tab-txt.preferred-width + 28px;
+            border-radius: 3px;
+            background: ti == root.current ? Theme.pane-head : (tab-ta.has-hover ? Theme.hover : transparent);
+            // 下面两个角补成直角，和路径栏连成一片
+            if ti == root.current: Rectangle {
+                y: parent.height - 3px;
+                height: 3px;
+                background: Theme.pane-head;
+            }
+            tab-txt := Text {
+                text: t;
+                color: ti == root.current ? Theme.text : Theme.text-faint;
+                font-size: 12px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            tab-ta := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    if (ti != root.current) {
+                        root.current = ti;
+                        root.picked(ti);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// 面板的外框：深色的缝里一块圆角很小的灰板（Houdini 的 pane）
+export component Pane inherits Rectangle {
+    background: Theme.surface;
+    border-width: 1px;
+    border-color: Theme.edge;
+    border-radius: 3px;
+    clip: true;
+}
+
+// 复选框（参数面板的开关，像 Houdini 的 toggle）
+export component CheckBox inherits Rectangle {
+    // 点了自己先翻过来再报（参数面板勾选时不重建，等 Rust 推回来就晚了）
+    in-out property <bool> checked;
+    in property <string> text;
+    callback toggled(bool);
+
+    height: 24px;
+    min-width: row.preferred-width;
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
+    }
+    row := HorizontalLayout {
+        spacing: 8px;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 16px;
+                height: 16px;
+                border-radius: 3px;
+                border-width: 1px;
+                border-color: ta.has-hover ? Theme.focus : Theme.border-strong;
+                background: Theme.field;
+                if root.checked: Path {
+                    width: 12px;
+                    height: 12px;
+                    viewbox-width: 24;
+                    viewbox-height: 24;
+                    commands: "M5 12.5 L10 17.5 L19 7";
+                    stroke: Theme.focus;
+                    stroke-width: 3.2px;
+                    stroke-line-cap: round;
+                    stroke-line-join: round;
+                    fill: transparent;
+                }
+            }
+        }
+        if root.text != "": Text {
+            text: root.text;
+            color: Theme.text-faint;
+            font-size: 12px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+// 右键菜单的一行：左边文字，右边快捷键
+export component MenuRow inherits Rectangle {
+    in property <string> label;
+    in property <string> keys;
+    callback clicked();
+
+    height: 30px;
+    border-radius: 5px;
+    background: ta.has-hover ? Theme.hover : transparent;
+
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 16px;
+        Text {
+            horizontal-stretch: 1;
+            text: root.label;
+            color: Theme.text;
+            font-size: 13px;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.keys;
+            color: Theme.text-faint;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// 浮层卡片
+export component Card inherits Rectangle {
+    background: Theme.surface;
+    border-width: 1px;
+    border-color: Theme.border-strong;
+    border-radius: 10px;
+    drop-shadow-blur: 18px;
+    drop-shadow-offset-y: 4px;
+    drop-shadow-color: Theme.shadow;
+}
+
+// 代码编辑框：输入框本身的文字是透明的，下面叠几层同样排版的彩色文本做语法高亮
+// （每层只留一类字符，其余是等宽空白，所以位置和输入框完全对齐）；光标自己画。
+// 补全列表由外面画（要浮在面板之上），这里只处理按键。
+export component CodeEditor inherits Rectangle {
+    in property <string> value;        // 初始内容，之后以输入框里的为准
+    in property <[string]> layers;     // 高亮层
+    in property <int> item-count;      // 补全列表的项数，0 = 没弹出
+    in-out property <int> index;       // 补全列表里选中的项
+    in property <int> picked: -1;      // 鼠标点了补全列表的第几项
+    in property <bool> read-only;      // 只看不改（Python 脚本页）：内容跟着 value 变
+    property <length> caret-x;
+    property <length> caret-y;
+    callback edited(string, int);                        // 文本, 光标
+    callback accept(string, int, int) -> CodeEdit;       // 文本, 光标, 选中的补全
+    callback key(string, int, int, string) -> CodeEdit;  // 文本, 选区起点, 光标, tab / enter
+    callback dismiss();
+    callback caret-moved(length, length);                // 光标在窗口里的位置
+    callback picked-done();
+
+    function apply(e: CodeEdit) {
+        input.text = e.text;
+        input.set-selection-offsets(e.cursor, e.cursor);
+        root.edited(e.text, e.cursor);
+    }
+
+    changed picked => {
+        if (self.picked >= 0) {
+            root.apply(root.accept(input.text, input.cursor-position-byte-offset, self.picked));
+            root.picked-done();
+        }
+    }
+
+    forward-focus: input;
+    border-radius: 3px;
+    border-width: 1px;
+    border-color: input.has-focus && !root.read-only ? Theme.focus : Theme.border-strong;
+    background: Theme.field;
+
+    sv := ScrollView {
+        x: 8px;
+        y: 6px;
+        width: parent.width - 10px;
+        height: parent.height - 8px;
+        content-width: max(self.visible-width, input.preferred-width + 24px);
+        content-height: max(self.visible-height, input.preferred-height + 8px);
+
+        for layer[li] in root.layers: Text {
+            x: 0px;
+            y: 0px;
+            width: sv.content-width;
+            height: sv.content-height;
+            text: layer;
+            color: Theme.code(li);
+            font-family: "Consolas";
+            font-size: 13px;
+            wrap: no-wrap;
+            vertical-alignment: top;
+        }
+
+        input := TextInput {
+            x: 0px;
+            y: 0px;
+            width: sv.content-width;
+            height: sv.content-height;
+            text: root.value;
+            single-line: false;
+            wrap: no-wrap;
+            color: transparent;
+            selection-foreground-color: transparent;
+            selection-background-color: Theme.accent.transparentize(0.72);
+            font-family: "Consolas";
+            font-size: 13px;
+            page-height: sv.visible-height;
+            read-only: root.read-only;
+
+            edited => { root.edited(self.text, self.cursor-position-byte-offset); }
+
+            key-pressed(e) => {
+                if (root.item-count > 0) {
+                    if (e.text == Key.DownArrow) {
+                        root.index = mod(root.index + 1, root.item-count);
+                        return EventResult.accept;
+                    }
+                    if (e.text == Key.UpArrow) {
+                        root.index = mod(root.index + root.item-count - 1, root.item-count);
+                        return EventResult.accept;
+                    }
+                    if (e.text == Key.Tab || e.text == Key.Return) {
+                        root.apply(root.accept(self.text, self.cursor-position-byte-offset, root.index));
+                        return EventResult.accept;
+                    }
+                    if (e.text == Key.Escape) {
+                        root.dismiss();
+                        return EventResult.accept;
+                    }
+                    if (e.text == Key.LeftArrow || e.text == Key.RightArrow) {
+                        root.dismiss();
+                    }
+                }
+                if (root.read-only) {
+                    reject
+                }
+                if (e.text == Key.Tab) {
+                    root.apply(root.key(self.text, self.anchor-position-byte-offset,
+                        self.cursor-position-byte-offset, "tab"));
+                    return EventResult.accept;
+                }
+                if (e.text == Key.Return && !e.modifiers.control) {
+                    root.apply(root.key(self.text, self.anchor-position-byte-offset,
+                        self.cursor-position-byte-offset, "enter"));
+                    return EventResult.accept;
+                }
+                reject
+            }
+
+            cursor-position-changed(cpos) => {
+                root.caret-x = cpos.x;
+                root.caret-y = cpos.y;
+                // 光标滚进可见范围
+                if (cpos.x + sv.content-x < 0px) {
+                    sv.content-x = min(0px, -cpos.x + 24px);
+                } else if (cpos.x + sv.content-x > sv.visible-width - 16px) {
+                    sv.content-x = sv.visible-width - 16px - cpos.x;
+                }
+                if (cpos.y + sv.content-y < 0px) {
+                    sv.content-y = -cpos.y;
+                } else if (cpos.y + sv.content-y > sv.visible-height - 20px) {
+                    sv.content-y = sv.visible-height - 20px - cpos.y;
+                }
+                root.caret-moved(self.absolute-position.x + cpos.x, self.absolute-position.y + cpos.y);
+            }
+
+            changed has-focus => {
+                if (!self.has-focus) {
+                    root.dismiss();
+                }
+            }
+        }
+
+        if input.has-focus && !root.read-only: Rectangle {
+            x: root.caret-x;
+            y: root.caret-y;
+            width: 1.5px;
+            height: 18px;
+            background: Theme.text;
+        }
+    }
+}

@@ -1,0 +1,2 @@
+// 程序图标（exe 文件、任务栏）：assets/make_icon.py 生成 icon.ico
+1 ICON "icon.ico"

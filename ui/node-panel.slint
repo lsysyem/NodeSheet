@@ -1,0 +1,2261 @@
+// 节点面板：参数面板（上）+ 节点图面板（下），各是一块 Houdini 式的 pane（页签条 + 路径栏）。
+// 节点图里的节点是窄条：左端旁路旗标、右端显示旗标、中间分类图标，名字和摘要写在节点右边；
+// 中键点节点看它的帮助（连同它输出的情况）。另有“添加”菜单和 Tab 搜索菜单（中键点里面的项也是看帮助）。
+// 双击 expr 节点进到它里面的表达式网络（vop 为真）：节点从左往右连，头上写输出类型，下面一行一个输入端口。
+import { Button, LineEdit, ScrollView, ListView, ComboBox } from "std-widgets.slint";
+import { Theme, Icons, NodeItem, WireItem, CompletionItem, CodeEdit, ParamItem, KindItem, PortItem } from "theme.slint";
+import { TypeEdit } from "type-editor.slint";
+import { IconButton, Card, CodeEditor, PaneTabs, Pane, CheckBox } from "widgets.slint";
+import { MenuEntry, MenuSeparator2, MenuPanel } from "menubar.slint";
+
+// 节点身上的鼠标（两级的节点通用）：左键按下 / 拖动 / 松开报给 Rust（坐标是画布坐标，Rust 挪选中的那一组），
+// 中键按住 = 看节点的信息（拖起来就变成平移），右键 = 菜单。
+component NodeTouch inherits TouchArea {
+    in property <length> node-x;   // 这块 TouchArea 左上角的画布坐标
+    in property <length> node-y;
+    in property <float> zoom;
+    callback press(bool, bool, bool, length, length); // Shift, Ctrl, Alt, 画布坐标
+    callback drag(length, length);
+    callback release();
+    callback pan-by(length, length);
+    callback info(bool);             // 中键按住节点：显示 / 收起它的信息
+    callback menu(length, length);   // TouchArea 里的位置
+    callback hover(length, length);  // TouchArea 里的位置
+
+    property <bool> left;        // 左键按着
+    property <bool> dragging;
+    property <bool> mid;         // 中键按着
+    property <bool> mid-moved;
+    property <length> mx;        // 中键按下的位置
+    property <length> my;
+
+    moved => {
+        if (self.mid) {
+            // 节点跟着平移一起动：每次挪“鼠标离按下的位置”这么多，鼠标就一直停在节点上同一点
+            if (self.mid-moved || abs(self.mouse-x - self.mx) > 4px || abs(self.mouse-y - self.my) > 4px) {
+                if (!self.mid-moved) {
+                    self.info(false);
+                }
+                self.mid-moved = true;
+                self.pan-by(self.mouse-x - self.mx, self.mouse-y - self.my);
+            }
+        } else if (self.left && (self.dragging || abs(self.mouse-x - self.pressed-x) > 4px
+            || abs(self.mouse-y - self.pressed-y) > 4px)) {
+            self.dragging = true;
+            self.drag(self.node-x + self.mouse-x / self.zoom, self.node-y + self.mouse-y / self.zoom);
+        }
+    }
+    pointer-event(e) => {
+        if (e.kind == PointerEventKind.move) {
+            self.hover(self.mouse-x, self.mouse-y);
+        } else if (e.kind == PointerEventKind.cancel) {
+            if (self.mid) {
+                self.mid = false;
+                self.info(false);
+            }
+            if (self.left) {
+                self.left = false;
+                self.dragging = false;
+                self.release();
+            }
+        } else if (e.button == PointerEventButton.left) {
+            if (e.kind == PointerEventKind.down) {
+                self.left = true;
+                self.dragging = false;
+                self.press(e.modifiers.shift, e.modifiers.control, e.modifiers.alt,
+                    self.node-x + self.mouse-x / self.zoom, self.node-y + self.mouse-y / self.zoom);
+            } else if (e.kind == PointerEventKind.up && self.left) {
+                self.left = false;
+                self.dragging = false;
+                self.release();
+            }
+        } else if (e.button == PointerEventButton.middle) {
+            if (e.kind == PointerEventKind.down) {
+                self.mid = true;
+                self.mid-moved = false;
+                self.mx = self.mouse-x;
+                self.my = self.mouse-y;
+                self.info(true);
+            } else if (e.kind == PointerEventKind.up && self.mid) {
+                self.mid = false;
+                self.info(false);
+            }
+        } else if (e.button == PointerEventButton.right && e.kind == PointerEventKind.down) {
+            self.menu(self.mouse-x, self.mouse-y);
+        }
+    }
+}
+
+export component NodePanel inherits Rectangle {
+    // ---- 状态都在 AppWindow 上（Rust 只和它打交道），这里接进来用
+    in-out property <int> ac-index;
+    in-out property <[CompletionItem]> ac-items;
+    in-out property <int> ac-picked;
+    in-out property <length> ac-x;
+    in-out property <length> ac-y;
+    in-out property <int> add-cat;
+    in-out property <bool> add-menu-visible;
+    in property <string> code-hint;
+    in property <[string]> code-layers;
+    in-out property <int> connect-from;
+    in-out property <bool> drag-active;
+    in-out property <int> drag-node;
+    in-out property <int> drag-slot;
+    in-out property <length> drag-x;
+    in-out property <length> drag-y;
+    in-out property <int> focus-area;
+    in-out property <length> hover-x;
+    in-out property <length> hover-y;
+    in property <int> node-cat;
+    in property <[string]> node-cats;
+    in property <string> node-code;
+    in property <string> node-code-head;   // 代码预览收起时的一行
+    in property <string> node-code-label: "代码";  // 那一行写的是“代码”还是“表达式”（表达式节点写成的文字）
+    in property <int> node-text-action;    // 标题栏的文字按钮：0 没有 / 1 转成文字 / 2 展开成节点
+    in property <string> node-desc;
+    in property <string> node-kind;        // 选中节点的类型名
+    in property <string> node-source;
+    in property <string> node-error;
+    in property <string> node-warn;   // 表达式网络里选中的节点的提醒（黄色，不算出错）
+    in property <[KindItem]> node-kinds;
+    in property <string> node-output;
+    in property <[ParamItem]> node-params;
+    in property <bool> node-running;
+    in property <string> node-title;
+    in property <string> graph-name;       // 路径栏：工程 / 文件名
+    in-out property <[NodeItem]> nodes;
+    in-out property <length> pan-x;
+    in-out property <length> pan-y;
+    in-out property <length> params-height;
+    in-out property <int> search-index;
+    in property <[KindItem]> search-results;
+    in-out property <bool> search-visible;
+    in property <bool> swap-node;
+    callback canvas-rect(length, length, length, length); // 画布在窗口里的 x, y, 宽, 高（变了就报）
+    in property <bool> wire-selected;
+    in property <[WireItem]> wires;
+    in-out property <float> zoom;
+    in-out property <float> zoom-prev;
+    in property <length> origin-x;   // 主区域左上角在窗口里的位置（浮层按它换算坐标）
+    in property <length> origin-y;
+    in property <bool> vop;                // 画布上是表达式网络
+    in property <[PortItem]> vop-ports;    // 表达式节点的输入端口（一行一个）
+    in property <[string]> net-crumbs;     // 一路进来的节点名（expr1、eval1…），点哪一级回到哪一级
+    in property <string> net-context;      // 它的上下文
+    in property <[string]> net-envs;       // group_by 的 expr 节点里：几张网络的页签（分组键 · 整表 / 聚合 · 每组 / 筛选组 · 每组）
+    in property <int> net-env;             // 正看着第几张
+    in property <string> net-hint;         // 网络是空的时候画布上的提示（空 = 默认的）
+    in property <bool> node-vop;           // 选中的是表达式节点
+    in property <bool> node-net;           // 选中的节点里面有表达式网络（能进去）
+    in property <[int]> node-cat-icons;    // “添加”菜单各分类的图标
+    in property <int> fit-request;         // 加一 = 摆好画布（换了一级 / H / G）
+    in-out property <bool> fit-selected;   // 那一次只看选中的（G）
+    in property <bool> space-down;         // 按着空格：左键拖 = 平移
+    in property <bool> cut-mode;           // 按着 Y：左键拖 = 剪线
+    in-out property <string> cut-trail;    // 剪线的轨迹（画布上的像素）
+
+    callback add-node(int);
+    callback canvas-clicked(length, length, length, bool);
+    callback close-search();
+    callback code-accept(string, int, int) -> CodeEdit;
+    callback code-edited(int, string, int);
+    callback code-key(string, int, int, string) -> CodeEdit;
+    callback connect-nodes(int, int, int);
+    callback disconnect-input(int, int);
+    callback node-press(int, bool, bool, bool, length, length);
+    callback node-drag(length, length);
+    callback node-release();
+    callback box-select(length, length, length, length, int);
+    callback cut-point(length, length);
+    callback cut-end();
+    callback net-command(string, length, length);
+    callback open-search();                // 在 hover 处开 Tab 菜单
+    callback delete-selection();
+    callback param-accepted(int);
+    callback param-action(int);
+    callback param-browse(int);
+    callback open-pick(int, length, length);   // 参数旁边的“选列”：参数下标、按钮右下角（主区域里的坐标）
+    callback param-edited(int, string);
+    callback param-picked(int, int);
+    callback param-toggled(int, bool);
+    callback pick-found(int);
+    callback run-graph();
+    callback search-nodes(string);
+    callback set-display(int);
+    callback stop-graph();
+    callback toggle-bypass(int);
+    callback wire-dropped(int, int, length, length);
+    callback grab-focus();   // 键盘焦点交给主区域（Delete / Tab / Ctrl+C 在那边处理）
+    callback rename-node(string);
+    callback node-info(int) -> string;             // 中键信息窗的内容：节点输出的行列、用时、输入、各列类型
+    callback kind-help(int, int, length, length);  // 中键点了菜单里的种类：0 Tab 搜索 / 1 添加菜单, 下标, 位置
+    callback selected-help();                      // 参数面板头上的“?”
+    callback fit-view(length, length, bool); // “适应”：按画布大小摆好平移和缩放（只看选中的）
+    callback copy-text(string);
+    callback enter-node(int);              // 进到 expr 节点里面（-1 = 选中的那个）
+    callback go-up();                      // 回到上一级
+    callback go-top();                     // 一直回到表格级
+    callback go-level(int);                // 回到第几级（1 = 最外面那个 expr 节点里面）
+    callback pick-env(int);                // 换到第几张网络（net-envs）
+    callback text-action();                // 点了“转成文字 / 展开成节点”
+
+    // 节点 112×38：上下各 4px 是端口，中间 30px 是节点本身。输入端口在上沿均匀排开，输出端口在下沿正中。
+    // 名字和摘要画在节点右边（120px 起）。改尺寸要同步 graph.rs 的 NODE_W / NODE_H / PORT_*_Y
+    pure function port-x(inputs: int, slot: int) -> length {
+        return 112px * (slot + 1) / (inputs + 1);
+    }
+
+    // 表达式节点：160 宽；头 24 高，输出端口在头的右端；下面每个输入端口一行 18（端口在左边沿）；
+    // 没有输入的只有头（30 高）。改尺寸要同步 graph.rs 的 VOP_W / VOP_HEAD / VOP_ROW
+    pure function vop-h(inputs: int) -> length {
+        return inputs == 0 ? 30px : 24px + inputs * 18px + 4px;
+    }
+    // 端口位置（画布坐标），两级通用
+    pure function in-x(n: NodeItem, slot: int) -> length {
+        return root.vop ? n.x : n.x + root.port-x(n.inputs, slot);
+    }
+    pure function in-y(n: NodeItem, slot: int) -> length {
+        return root.vop ? n.y + 24px + (slot + 0.5) * 18px : n.y;
+    }
+    pure function out-x(n: NodeItem) -> length {
+        return root.vop ? n.x + 160px : n.x + 56px;
+    }
+    pure function out-y(n: NodeItem) -> length {
+        return root.vop ? n.y + 12px : n.y + 38px;
+    }
+    // 连线的贝塞尔：表格级上下弯，表达式级左右弯（和 graph.rs 的 wire_at 一样）
+    pure function wire-path(x1: float, y1: float, x2: float, y2: float) -> string {
+        return root.vop
+            ? "M " + x1 + " " + y1 + " C " + (x1 + max(30 * root.zoom, abs(x2 - x1) / 2)) + " " + y1 + " "
+                + (x2 - max(30 * root.zoom, abs(x2 - x1) / 2)) + " " + y2 + " " + x2 + " " + y2
+            : "M " + x1 + " " + y1 + " C " + x1 + " " + (y1 + 24 * root.zoom) + " " + x2 + " "
+                + (y2 - 24 * root.zoom) + " " + x2 + " " + y2;
+    }
+
+    changed fit-request => {
+        root.fit-view(canvas.width, canvas.height, root.fit-selected);
+        root.fit-selected = false;
+    }
+
+    // 滚轮缩放：以鼠标位置（画布坐标）为中心
+    function zoom-canvas(delta: length, mx: length, my: length) {
+        root.zoom-prev = root.zoom;
+        root.zoom = min(2.5, max(0.3, root.zoom * (delta > 0 ? 1.12 : 1 / 1.12)));
+        root.pan-x = mx - (mx - root.pan-x) * root.zoom / root.zoom-prev;
+        root.pan-y = my - (my - root.pan-y) * root.zoom / root.zoom-prev;
+    }
+
+    // 中键信息窗（按住节点时显示）
+    property <bool> info-visible: false;
+    property <int> info-node: 0;
+    property <string> info-text;
+    function show-info(i: int, on: bool) {
+        if (on) {
+            root.info-node = i;
+            root.info-text = root.node-info(i);
+        }
+        root.info-visible = on;
+    }
+
+    // 右键菜单：kind 0 空白处 / 1 节点 / 2 连线；(x, y) 是画布上的像素位置
+    property <int> menu-kind;
+    property <int> menu-node: -1;
+    property <length> menu-x;
+    property <length> menu-y;
+    function open-menu(kind: int, node: int, x: length, y: length) {
+        root.menu-kind = kind;
+        root.menu-node = node;
+        root.menu-x = x;
+        root.menu-y = y;
+        root.hover-x = x;
+        root.hover-y = y;
+        ctx-menu.show();
+    }
+    // 右键点了节点：没选中的只选它，选中的（多选里的）成为当前节点、选中的不变
+    function node-menu(i: int, x: length, y: length) {
+        root.add-menu-visible = false;
+        root.search-visible = false;
+        root.focus-area = 2;
+        root.grab-focus();
+        root.node-press(i, false, false, false, 0, 0);
+        root.open-menu(1, i, x, y);
+    }
+    function command(name: string) {
+        root.net-command(name, (root.menu-x - root.pan-x) / root.zoom, (root.menu-y - root.pan-y) / root.zoom);
+    }
+
+    // 按钮缩放：以画布中心为中心
+    function zoom-step(up: bool) {
+        root.zoom-canvas(up ? 1px : -1px, canvas.width / 2, canvas.height / 2);
+    }
+
+    // 输入过的框不再跟着绑定走：选中的节点换了 / 改名了，手动填回去
+    changed node-title => { name-input.text = root.node-title; }
+
+    property <bool> code-open: false;        // 代码预览展开
+    // 参数面板占的高度：没选中节点时不显示；面板太矮时让着画布
+    property <length> params-h: root.node-title == "" ? 0px
+        : max(140px, min(root.params-height, root.height - 190px));
+    property <length> gap: root.params-h > 0px ? 4px : 0px;
+
+    // ================================================================ 参数面板
+    params-pane := Pane {
+        visible: root.params-h > 0px;
+        y: root.swap-node ? root.height - root.params-h : 0px;
+        height: root.params-h;
+
+        PaneTabs {
+            y: 0px;
+            tabs: ["参数"];
+            current: 0;
+        }
+
+        // 节点头：类型图标 + 类型名 + 节点名（可改）+ 来源 + 类型入口
+        Rectangle {
+            y: 26px;
+            height: 34px;
+            background: Theme.pane-head;
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 6px;
+                spacing: 8px;
+                VerticalLayout {
+                    alignment: center;
+                    Path {
+                        width: 17px;
+                        height: 17px;
+                        viewbox-width: 24;
+                        viewbox-height: 24;
+                        commands: Icons.cat(root.node-cat);
+                        stroke: Theme.cat(root.node-cat);
+                        stroke-width: 1.8px;
+                        stroke-line-cap: round;
+                        stroke-line-join: round;
+                        fill: transparent;
+                    }
+                }
+                Text {
+                    text: root.node-kind;
+                    color: Theme.text-faint;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+                // 节点名：回车或点别处时改名
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 140px;
+                        height: 22px;
+                        border-radius: 3px;
+                        border-width: 1px;
+                        border-color: name-input.has-focus ? Theme.focus : Theme.border-strong;
+                        background: Theme.field;
+                        name-input := TextInput {
+                            x: 6px;
+                            width: parent.width - 12px;
+                            text: root.node-title;
+                            color: Theme.text;
+                            font-size: 12.5px;
+                            font-weight: 600;
+                            single-line: true;
+                            vertical-alignment: center;
+                            accepted => {
+                                root.rename-node(self.text);
+                                self.text = root.node-title; // 改成功后 node-title 跟着变，下面的 changed 再填上新名字
+                                root.grab-focus();
+                            }
+                            changed has-focus => {
+                                if (!self.has-focus && self.text != root.node-title) {
+                                    root.rename-node(self.text);
+                                    self.text = root.node-title;
+                                }
+                            }
+                        }
+                    }
+                }
+                // 定义从哪来：用户 / 工程 / 已改内置 / 私有参数（内置的不标）
+                if root.node-source != "": VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        height: 16px;
+                        width: source-txt.preferred-width + 12px;
+                        border-radius: 8px;
+                        background: root.node-source == "私有参数" ? Theme.cat(2).transparentize(0.7)
+                            : root.node-source == "已改内置" ? Theme.warn.transparentize(0.65) : Theme.chip-bg;
+                        source-txt := Text {
+                            text: root.node-source;
+                            color: Theme.text;
+                            font-size: 10.5px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.node-desc;
+                    color: Theme.text-faint;
+                    font-size: 11px;
+                    overflow: elide;
+                    vertical-alignment: center;
+                }
+                // 表达式节点：连同上游收成一个 snippet（文字）；snippet：拆开成节点
+                if root.node-text-action > 0: VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        small: true;
+                        icon: root.node-text-action == 1 ? Icons.code : Icons.nodes;
+                        label: root.node-text-action == 1 ? "转成文字" : "展开成节点";
+                        clicked => { root.text-action(); }
+                    }
+                }
+                // expr / eval 节点：进到里面的表达式网络
+                if root.node-net: VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        small: true;
+                        icon: Icons.chevron;
+                        label: "进入网络";
+                        keys: "回车";
+                        active: true;
+                        clicked => { root.enter-node(-1); }
+                    }
+                }
+                // 改这个节点的参数界面 / 类型定义；code 节点可以存成新的节点类型
+                if TypeEdit.can-save && !root.node-vop: VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        small: true;
+                        icon: Icons.plus;
+                        label: "存为类型";
+                        clicked => { TypeEdit.save-node(); }
+                    }
+                }
+                if !root.node-vop: VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        small: true;
+                        icon: Icons.nodes;
+                        label: TypeEdit.edit-label;
+                        clicked => { TypeEdit.edit-node(); }
+                    }
+                }
+                // 这种节点的帮助（F1），在右上角
+                VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        small: true;
+                        icon: Icons.help;
+                        label: "帮助";
+                        keys: "F1";
+                        clicked => { root.selected-help(); }
+                    }
+                }
+            }
+            Rectangle { y: parent.height - 1px; height: 1px; background: Theme.edge; }
+        }
+
+        // 表单（超出时滚动）；底下固定一条代码预览
+        Rectangle {
+            y: 60px;
+            height: parent.height - 60px - (root.node-code != "" ? 28px : 0px);
+            background: Theme.param-bg;
+
+            ScrollView {
+            params-box := VerticalLayout {
+                alignment: start;
+                padding: 10px;
+                padding-left: 6px;
+                padding-right: 18px; // 让出滚动条
+                spacing: 7px;
+
+                // 参数表单：标签右对齐在左栏（Houdini 的样子）；多行代码标签在上、占满一行；
+                // “方式 / 格式”这类页签画成文件夹页签，占满一行
+                for p in root.node-params: VerticalLayout {
+                    spacing: 3px;
+
+                    // 页签：选中哪一页，下面就只列那一页的参数
+                    if p.kind == 5: Rectangle {
+                        height: 28px;
+                        Rectangle { y: parent.height - 1px; height: 1px; background: Theme.border-strong; }
+                        HorizontalLayout {
+                            padding-left: 4px;
+                            alignment: start;
+                            spacing: 2px;
+
+                            for o[oi] in p.options: Rectangle {
+                                y: 4px;
+                                height: 24px;
+                                width: tab-txt.preferred-width + 26px;
+                                border-radius: 4px;
+                                border-width: oi == p.index ? 1px : 0px;
+                                border-color: Theme.border-strong;
+                                background: oi == p.index ? Theme.param-bg
+                                    : (tab-ta.has-hover ? Theme.hover : Theme.surface-alt);
+                                // 选中的页签和下面的表单连成一片：盖掉底边
+                                if oi == p.index: Rectangle {
+                                    x: 1px;
+                                    width: parent.width - 2px;
+                                    y: parent.height - 3px;
+                                    height: 4px;
+                                    background: Theme.param-bg;
+                                }
+
+                                tab-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        if (oi != p.index) {
+                                            root.param-picked(p.id, oi);
+                                        }
+                                    }
+                                }
+                                tab-txt := Text {
+                                    text: o;
+                                    color: oi == p.index ? Theme.text : Theme.text-faint;
+                                    font-size: 12px;
+                                    font-weight: oi == p.index ? 600 : 400;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    if p.kind == 1 && p.label != "": Text {
+                        text: p.label;
+                        color: Theme.text-muted;
+                        font-size: 12px;
+                    }
+
+                    if p.kind != 5: HorizontalLayout {
+                        spacing: 10px;
+
+                        if p.kind != 1: Text {
+                            width: 96px;
+                            text: p.label;
+                            color: Theme.text-muted;
+                            font-size: 12px;
+                            overflow: elide;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
+                        }
+
+                        if p.kind == 0 || p.kind == 4 || p.kind == 8: LineEdit {
+                            horizontal-stretch: 1;
+                            text: p.value;
+                            placeholder-text: p.hint;
+                            edited(text) => { root.param-edited(p.id, text); }
+                            accepted(text) => { root.param-accepted(p.id); }
+                        }
+                        // 收列名的参数：弹出选列框（pick.rs）
+                        if p.pick && (p.kind == 0 || p.kind == 8): VerticalLayout {
+                            alignment: center;
+                            pick-btn := IconButton {
+                                small: true;
+                                icon: Icons.columns;
+                                label: "选列";
+                                clicked => {
+                                    root.open-pick(p.id, pick-btn.absolute-position.x + pick-btn.width - root.origin-x,
+                                        pick-btn.absolute-position.y + pick-btn.height - root.origin-y);
+                                }
+                            }
+                        }
+                        if p.kind == 4: VerticalLayout {
+                            alignment: center;
+                            IconButton {
+                                small: true;
+                                icon: Icons.folder;
+                                label: "浏览";
+                                clicked => { root.param-browse(p.id); }
+                            }
+                        }
+
+                        // 数据类型：输入框里是写法，下拉帮着选（polars 的全部类型）
+                        if p.kind == 8: ComboBox {
+                            width: 112px;
+                            model: p.options;
+                            current-index: p.index;
+                            selected(value) => { root.param-picked(p.id, self.current-index); }
+                        }
+
+                        if p.kind == 1: VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 4px;
+
+                            CodeEditor {
+                                height: max(110px, root.params-height - 190px);
+                                value: p.value;
+                                layers: root.code-layers;
+                                item-count: root.ac-items.length;
+                                index <=> root.ac-index;
+                                picked: root.ac-picked;
+                                edited(text, cursor) => { root.code-edited(p.id, text, cursor); }
+                                accept(text, cursor, pick) => { root.code-accept(text, cursor, pick) }
+                                key(text, anchor, cursor, name) => { root.code-key(text, anchor, cursor, name) }
+                                dismiss => { root.ac-items = []; }
+                                caret-moved(x, y) => {
+                                    root.ac-x = x - root.origin-x;
+                                    root.ac-y = y - root.origin-y;
+                                }
+                                picked-done => { root.ac-picked = -1; }
+                            }
+
+                            // 光标所在调用的签名和说明
+                            if root.code-hint != "": Text {
+                                text: root.code-hint;
+                                color: Theme.text-muted;
+                                font-family: "Consolas";
+                                font-size: 11px;
+                                overflow: elide;
+                            }
+                        }
+
+                        if p.kind == 2: CheckBox {
+                            horizontal-stretch: 1;
+                            text: p.hint;
+                            checked: p.value == "True";
+                            toggled(on) => { root.param-toggled(p.id, on); }
+                        }
+
+                        if p.kind == 3: ComboBox {
+                            horizontal-stretch: 1;
+                            model: p.options;
+                            current-index: p.index;
+                            selected(value) => { root.param-picked(p.id, self.current-index); }
+                        }
+
+                        if p.kind == 6: Button {
+                            horizontal-stretch: 1;
+                            text: p.value;
+                            primary: true;
+                            clicked => { root.param-action(p.id); }
+                        }
+
+                        // 表达式节点的端口连了线：不能填，写着从哪接来的
+                        if p.kind == 7: Rectangle {
+                            horizontal-stretch: 1;
+                            height: 26px;
+                            border-radius: 3px;
+                            background: Theme.surface-alt;
+                            Text {
+                                x: 8px;
+                                width: parent.width - 16px;
+                                text: p.value;
+                                color: Theme.accent;
+                                font-size: 12px;
+                                overflow: elide;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                // 出错：红底的提示块
+                if root.node-error != "": Rectangle {
+                    border-radius: 4px;
+                    background: Theme.danger.transparentize(0.82);
+                    border-width: 1px;
+                    border-color: Theme.danger.transparentize(0.5);
+                    HorizontalLayout {
+                        padding: 8px;
+                        spacing: 8px;
+                        VerticalLayout {
+                            alignment: start;
+                            Rectangle {
+                                width: 14px;
+                                height: 14px;
+                                border-radius: 7px;
+                                background: Theme.danger;
+                                Text {
+                                    text: "!";
+                                    color: Theme.surface;
+                                    font-size: 10px;
+                                    font-weight: 700;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: root.node-error;
+                            color: Theme.text;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                // 提醒：黄底的提示块（算得出来，但多半不是想要的）
+                if root.node-error == "" && root.node-warn != "": Rectangle {
+                    border-radius: 4px;
+                    background: Theme.warn.transparentize(0.85);
+                    border-width: 1px;
+                    border-color: Theme.warn.transparentize(0.5);
+                    HorizontalLayout {
+                        padding: 8px;
+                        spacing: 8px;
+                        VerticalLayout {
+                            alignment: start;
+                            Rectangle {
+                                width: 14px;
+                                height: 14px;
+                                border-radius: 7px;
+                                background: Theme.warn;
+                                Text {
+                                    text: "i";
+                                    color: Theme.on-warn;
+                                    font-size: 10px;
+                                    font-weight: 700;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: root.node-warn;
+                            color: Theme.text;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                // 展开的代码：节点的完整代码
+                if root.code-open && root.node-code != "": Rectangle {
+                    border-radius: 3px;
+                    background: Theme.field;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    clip: true;
+
+                    VerticalLayout {
+                        padding: 8px;
+                        Text {
+                            text: root.node-code;
+                            color: Theme.text-muted;
+                            font-family: "Consolas";
+                            font-size: 11px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                if root.node-output != "": Text {
+                    text: root.node-output;
+                    color: Theme.text-muted;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                    overflow: elide;
+                    max-height: 90px;
+                }
+            }
+            }
+        }
+
+        // 代码预览：一行；点“展开”在表单最后看完整代码
+        if root.node-code != "": Rectangle {
+            y: parent.height - 28px;
+            height: 28px;
+            background: Theme.surface-alt;
+            Rectangle { y: 0px; height: 1px; background: Theme.edge; }
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 4px;
+                spacing: 8px;
+                Text {
+                    text: root.node-code-label;
+                    color: Theme.text-faint;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.node-code-head;
+                    color: Theme.text-muted;
+                    font-family: "Consolas";
+                    font-size: 11.5px;
+                    overflow: elide;
+                    vertical-alignment: center;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        small: true;
+                        label: root.code-open ? "收起" : "展开";
+                        clicked => { root.code-open = !root.code-open; }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        small: true;
+                        icon: Icons.copy;
+                        // 表达式：复制的就是那一段表达式
+                        clicked => { root.copy-text(root.node-code-label == "表达式" ? root.node-code-head : root.node-code); }
+                    }
+                }
+            }
+        }
+    }
+
+    // 两块面板之间的缝：上下拖动调参数面板的高度
+    if root.params-h > 0px: TouchArea {
+        y: root.swap-node ? root.height - root.params-h - root.gap : root.params-h;
+        height: root.gap;
+        mouse-cursor: ns-resize;
+        moved => {
+            if (self.pressed) {
+                root.params-height = max(140px, min(root.height - 190px,
+                    root.params-h + (root.swap-node ? -1 : 1) * (self.mouse-y - self.pressed-y)));
+            }
+        }
+    }
+
+    // ================================================================ 节点图面板
+    net-pane := Pane {
+        y: root.swap-node ? 0px : root.params-h + root.gap;
+        height: root.height - root.params-h - root.gap;
+
+        PaneTabs {
+            y: 0px;
+            tabs: ["节点图"];
+            current: 0;
+        }
+
+        // 路径栏：工程名 › 节点图；右边添加、运行、适应、缩放
+        Rectangle {
+            y: 26px;
+            height: 30px;
+            background: Theme.pane-head;
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 6px;
+                spacing: 6px;
+                if !root.vop: Text {
+                    text: root.graph-name;
+                    color: Theme.text-muted;
+                    font-size: 12px;
+                    overflow: elide;
+                    vertical-alignment: center;
+                }
+                if !root.vop: VerticalLayout {
+                    alignment: center;
+                    Path {
+                        width: 10px;
+                        height: 10px;
+                        viewbox-width: 24;
+                        viewbox-height: 24;
+                        commands: Icons.chevron;
+                        stroke: Theme.text-faint;
+                        stroke-width: 2.4px;
+                        stroke-line-cap: round;
+                        stroke-line-join: round;
+                        fill: transparent;
+                    }
+                }
+                // 进到表达式网络里时“节点图”可以点：回到表格级
+                Rectangle {
+                    width: crumb-txt.preferred-width + 8px;
+                    border-radius: 3px;
+                    background: root.vop && crumb-ta.has-hover ? Theme.hover : transparent;
+                    crumb-txt := Text {
+                        text: "节点图";
+                        color: root.vop ? (crumb-ta.has-hover ? Theme.accent : Theme.text-muted) : Theme.text;
+                        font-size: 12px;
+                        font-weight: root.vop ? 400 : 600;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    crumb-ta := TouchArea {
+                        enabled: root.vop;
+                        mouse-cursor: root.vop ? pointer : default;
+                        clicked => { root.go-top(); }
+                    }
+                }
+                if root.vop: VerticalLayout {
+                    alignment: center;
+                    Path {
+                        width: 10px;
+                        height: 10px;
+                        viewbox-width: 24;
+                        viewbox-height: 24;
+                        commands: Icons.chevron;
+                        stroke: Theme.text-faint;
+                        stroke-width: 2.4px;
+                        stroke-line-cap: round;
+                        stroke-line-join: round;
+                        fill: transparent;
+                    }
+                }
+                // 一路进来的每一级：点不是最里面的那一级 = 回到那一级
+                if root.vop: HorizontalLayout {
+                    spacing: 6px;
+                    for title[k] in root.net-crumbs: HorizontalLayout {
+                        spacing: 6px;
+                        if k > 0: VerticalLayout {
+                            alignment: center;
+                            Path {
+                                width: 10px;
+                                height: 10px;
+                                viewbox-width: 24;
+                                viewbox-height: 24;
+                                commands: Icons.chevron;
+                                stroke: Theme.text-faint;
+                                stroke-width: 2.4px;
+                                stroke-line-cap: round;
+                                stroke-line-join: round;
+                                fill: transparent;
+                            }
+                        }
+                        level := Rectangle {
+                            property <bool> last: k == root.net-crumbs.length - 1;
+                            width: level-txt.preferred-width + 8px;
+                            border-radius: 3px;
+                            background: !level.last && level-ta.has-hover ? Theme.hover : transparent;
+                            level-txt := Text {
+                                text: title;
+                                color: level.last ? Theme.text : (level-ta.has-hover ? Theme.accent : Theme.text-muted);
+                                font-size: 12px;
+                                font-weight: level.last ? 600 : 400;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            level-ta := TouchArea {
+                                enabled: !level.last;
+                                mouse-cursor: level.last ? default : pointer;
+                                clicked => { root.go-level(k + 1); }
+                            }
+                        }
+                    }
+                }
+                if root.vop: VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        height: 16px;
+                        width: ctx-txt.preferred-width + 12px;
+                        border-radius: 8px;
+                        background: Theme.cat(3).transparentize(0.7);
+                        ctx-txt := Text {
+                            text: root.net-context;
+                            color: Theme.text;
+                            font-size: 10.5px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                // group_by 的三张网络：在哪里算的分开放，一张一个页签
+                if root.vop && root.net-envs.length > 0: HorizontalLayout {
+                    spacing: 2px;
+                    for label[i] in root.net-envs: VerticalLayout {
+                        alignment: center;
+                        env-tab := Rectangle {
+                            property <bool> on: i == root.net-env;
+                            height: 20px;
+                            width: env-txt.preferred-width + 16px;
+                            border-radius: 3px;
+                            background: env-tab.on ? Theme.chip-bg : (env-ta.has-hover ? Theme.hover : transparent);
+                            env-txt := Text {
+                                text: label;
+                                color: env-tab.on ? Theme.text : (env-ta.has-hover ? Theme.accent : Theme.text-muted);
+                                font-size: 11.5px;
+                                font-weight: env-tab.on ? 600 : 400;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            if env-tab.on: Rectangle {
+                                y: parent.height - 2px;
+                                height: 2px;
+                                background: Theme.focus;
+                            }
+                            env-ta := TouchArea {
+                                enabled: !env-tab.on;
+                                mouse-cursor: env-tab.on ? default : pointer;
+                                clicked => { root.pick-env(i); }
+                            }
+                        }
+                    }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        small: true;
+                        icon: Icons.plus;
+                        label: "添加";
+                        keys: "Tab";
+                        active: root.add-menu-visible;
+                        clicked => { root.add-menu-visible = !root.add-menu-visible; }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        small: true;
+                        icon: root.node-running ? Icons.stop : Icons.play;
+                        label: root.node-running ? "停止" : "运行";
+                        keys: root.node-running ? "" : "F5";
+                        active: root.node-running;
+                        clicked => {
+                            if (root.node-running) {
+                                root.stop-graph();
+                            } else {
+                                root.run-graph();
+                            }
+                        }
+                    }
+                }
+                Rectangle {
+                    width: 1px;
+                    background: Theme.border-strong;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        small: true;
+                        icon: Icons.fit;
+                        label: "适应";
+                        clicked => { root.fit-view(canvas.width, canvas.height, false); }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        small: true;
+                        icon: Icons.minus;
+                        clicked => { root.zoom-step(false); }
+                    }
+                }
+                Text {
+                    width: 36px;
+                    text: round(root.zoom * 100) + "%";
+                    color: Theme.text-faint;
+                    font-size: 11.5px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        small: true;
+                        icon: Icons.plus;
+                        clicked => { root.zoom-step(true); }
+                    }
+                }
+            }
+            Rectangle { y: parent.height - 1px; height: 1px; background: Theme.edge; }
+        }
+
+        // 画布：空白处拖动平移，滚轮缩放，双击复位
+        canvas := Rectangle {
+            y: 56px;
+            height: parent.height - 56px;
+            clip: true;
+            background: Theme.canvas;
+
+            // 画布在窗口里的位置和大小报给主窗口：拖进来的文件落在画布上时建 read 节点（Rust 的 files::drag_drop）
+            property <length> abs-x: self.absolute-position.x;
+            property <length> abs-y: self.absolute-position.y;
+            function report() {
+                root.canvas-rect(self.abs-x, self.abs-y, self.width, self.height);
+            }
+            init => { self.report(); }
+            changed abs-x => { self.report(); }
+            changed abs-y => { self.report(); }
+            changed width => { self.report(); }
+            changed height => { self.report(); }
+
+            // 网格：跟着平移和缩放走；缩得太小时隔一条画一条
+            property <length> step: (root.zoom < 0.5 ? 56px : 28px) * root.zoom;
+            for gi in ceil(self.width / self.step) + 1: Rectangle {
+                x: mod(root.pan-x, canvas.step) + (gi - 1) * canvas.step;
+                width: 1px;
+                background: Theme.canvas-grid;
+            }
+            for gj in ceil(self.height / self.step) + 1: Rectangle {
+                y: mod(root.pan-y, canvas.step) + (gj - 1) * canvas.step;
+                height: 1px;
+                background: Theme.canvas-grid;
+            }
+
+            // 空白处（照 Houdini）：左键拖 = 框选（Shift 加选、Ctrl 减选），点一下 = 选连线 / 取消选中；
+            // 中键拖 = 平移；右键 = 菜单（点在连线上是连线的菜单）；滚轮缩放，双击复位
+            pan-ta := TouchArea {
+                property <length> start-x;   // 中键按下时的平移
+                property <length> start-y;
+                property <length> mx;        // 中键按下的位置
+                property <length> my;
+                property <bool> mid;
+                property <bool> boxing;      // 正在框选
+                property <int> box-mode;     // 0 换 / 1 加 / 2 减
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.move && !root.search-visible) {
+                        root.hover-x = self.mouse-x;
+                        root.hover-y = self.mouse-y;
+                    } else if (e.kind == PointerEventKind.down) {
+                        root.connect-from = -1;
+                        root.add-menu-visible = false;
+                        root.search-visible = false;
+                        root.hover-x = self.mouse-x;
+                        root.hover-y = self.mouse-y;
+                        root.focus-area = 2;
+                        root.grab-focus();
+                        if (e.button == PointerEventButton.middle) {
+                            self.mid = true;
+                            self.start-x = root.pan-x;
+                            self.start-y = root.pan-y;
+                            self.mx = self.mouse-x;
+                            self.my = self.mouse-y;
+                        } else if (e.button == PointerEventButton.left) {
+                            self.boxing = false;
+                            self.box-mode = e.modifiers.shift ? 1 : (e.modifiers.control ? 2 : 0);
+                        } else if (e.button == PointerEventButton.right) {
+                            root.canvas-clicked((self.mouse-x - root.pan-x) / root.zoom,
+                                (self.mouse-y - root.pan-y) / root.zoom, 7px / root.zoom, true);
+                            root.open-menu(root.wire-selected ? 2 : 0, -1, self.mouse-x, self.mouse-y);
+                        }
+                    } else if (e.kind == PointerEventKind.up) {
+                        if (e.button == PointerEventButton.middle) {
+                            self.mid = false;
+                        } else if (e.button == PointerEventButton.left && self.boxing) {
+                            self.boxing = false;
+                            root.box-select((self.pressed-x - root.pan-x) / root.zoom, (self.pressed-y - root.pan-y) / root.zoom,
+                                (self.mouse-x - root.pan-x) / root.zoom, (self.mouse-y - root.pan-y) / root.zoom, self.box-mode);
+                        }
+                    } else if (e.kind == PointerEventKind.cancel) {
+                        self.mid = false;
+                        self.boxing = false;
+                    }
+                }
+                // 没拖动的点击（拖过的话 boxing 还没清，松手时才清）：选连线 / 取消选中
+                clicked => {
+                    if (!self.boxing) {
+                        root.canvas-clicked((self.mouse-x - root.pan-x) / root.zoom,
+                            (self.mouse-y - root.pan-y) / root.zoom, 7px / root.zoom, false);
+                    }
+                }
+                double-clicked => {
+                    if (!self.boxing) {
+                        root.pan-x = 0px;
+                        root.pan-y = 0px;
+                        root.zoom = 1.0;
+                    }
+                }
+                moved => {
+                    if (self.mid) {
+                        root.pan-x = self.start-x + self.mouse-x - self.mx;
+                        root.pan-y = self.start-y + self.mouse-y - self.my;
+                    } else if (self.pressed && (self.boxing || abs(self.mouse-x - self.pressed-x) > 4px
+                        || abs(self.mouse-y - self.pressed-y) > 4px)) {
+                        self.boxing = true;
+                    }
+                }
+                scroll-event(e) => {
+                    root.zoom-canvas(e.delta-y, self.mouse-x, self.mouse-y);
+                    accept
+                }
+            }
+
+            // 连线（视框与画布等大，坐标即像素）：选中节点的连线是黄的；表达式网络里按上游输出的类型上色；
+            // 拖着的节点压着的那条（松手就插进去）是高亮的粗线
+            for w in root.wires: Path {
+                property <bool> lit: root.nodes[w.dst].selected || root.nodes[w.src].selected;
+                property <float> x1: (root.out-x(root.nodes[w.src]) * root.zoom + root.pan-x) / 1px;
+                property <float> y1: (root.out-y(root.nodes[w.src]) * root.zoom + root.pan-y) / 1px;
+                property <float> x2: (root.in-x(root.nodes[w.dst], w.slot) * root.zoom + root.pan-x) / 1px;
+                property <float> y2: (root.in-y(root.nodes[w.dst], w.slot) * root.zoom + root.pan-y) / 1px;
+                x: 0px;
+                y: 0px;
+                width: canvas.width;
+                height: canvas.height;
+                viewbox-width: canvas.width / 1px;
+                viewbox-height: canvas.height / 1px;
+                clip: true;
+                commands: root.wire-path(self.x1, self.y1, self.x2, self.y2);
+                stroke: w.hot ? Theme.accent : w.selected ? Theme.danger : (self.lit ? Theme.select
+                    : (root.vop ? Theme.tcolor(root.nodes[w.src].tgroup) : Theme.wire));
+                stroke-width: w.hot || w.selected ? 3px : (self.lit ? 1.8px : (root.vop ? 1.6px : 1.4px));
+                stroke-line-cap: round;
+                fill: transparent;
+            }
+
+            // 表达式网络的节点：头（名字 + 输出类型 + 输出端口）+ 一行一个输入端口；摘要写在节点上面
+            if root.vop: Rectangle {
+                x: 0px;
+                y: 0px;
+                width: canvas.width;
+                height: canvas.height;
+
+                for n[i] in root.nodes: Rectangle {
+                    x: n.x * root.zoom + root.pan-x;
+                    y: n.y * root.zoom + root.pan-y;
+                    width: 160px * root.zoom;
+                    height: root.vop-h(n.inputs) * root.zoom;
+
+                    vop-ta := NodeTouch {
+                        node-x: n.x;
+                        node-y: n.y;
+                        zoom: root.zoom;
+                        hover(x, y) => {
+                            if (!root.search-visible) {
+                                root.hover-x = n.x * root.zoom + root.pan-x + x;
+                                root.hover-y = n.y * root.zoom + root.pan-y + y;
+                            }
+                        }
+                        press(shift, ctrl, alt, x, y) => {
+                            root.add-menu-visible = false;
+                            root.search-visible = false;
+                            root.focus-area = 2;
+                            root.grab-focus();
+                            root.node-press(i, shift, ctrl, alt, x, y);
+                        }
+                        drag(x, y) => { root.node-drag(x, y); }
+                        release => { root.node-release(); }
+                        pan-by(dx, dy) => {
+                            root.pan-x += dx;
+                            root.pan-y += dy;
+                        }
+                        info(on) => { root.show-info(i, on); }
+                        menu(x, y) => { root.node-menu(i, n.x * root.zoom + root.pan-x + x, n.y * root.zoom + root.pan-y + y); }
+                        scroll-event(e) => {
+                            root.zoom-canvas(e.delta-y, n.x * root.zoom + root.pan-x + self.mouse-x,
+                                n.y * root.zoom + root.pan-y + self.mouse-y);
+                            accept
+                        }
+                        // eval 这类带网络的节点：双击进到里面
+                        double-clicked => { root.enter-node(i); }
+                    }
+
+                    if n.selected: Rectangle {
+                        x: -2px;
+                        y: -2px;
+                        width: parent.width + 4px;
+                        height: parent.height + 4px;
+                        border-radius: 6px * root.zoom + 2px;
+                        border-width: 2px;
+                        border-color: Theme.select;
+                    }
+
+                    Rectangle {
+                        border-radius: 5px * root.zoom;
+                        border-width: 1px;
+                        border-color: vop-ta.has-hover && !n.selected ? Theme.text-faint : Theme.node-edge;
+                        background: n.error ? Theme.danger.mix(Theme.node-bg, 0.25) : Theme.node-bg;
+                        clip: true;
+
+                        // 头：输出节点用表达式分类的颜色垫底
+                        Rectangle {
+                            y: 0px;
+                            height: 24px * root.zoom;
+                            background: n.output ? Theme.cat(3).transparentize(0.55) : Theme.node-cap;
+                            Text {
+                                x: 8px * root.zoom;
+                                width: parent.width - 16px * root.zoom - vop-type.preferred-width;
+                                text: n.title;
+                                color: n.selected ? Theme.select : Theme.text;
+                                font-size: 11.5px * root.zoom;
+                                font-weight: 600;
+                                overflow: elide;
+                                vertical-alignment: center;
+                            }
+                            vop-type := Text {
+                                x: parent.width - self.preferred-width - 12px * root.zoom;
+                                text: n.error ? "!" : n.dtype;
+                                color: Theme.tcolor(n.tgroup);
+                                font-size: 10.5px * root.zoom;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    // 摘要：节点上面一行（右边是连线的地方）
+                    Text {
+                        x: 2px * root.zoom;
+                        y: -17px * root.zoom;
+                        width: min(self.preferred-width, 300px * root.zoom);
+                        height: 15px * root.zoom;
+                        text: n.summary;
+                        color: n.error ? Theme.danger : n.warn ? Theme.warn : Theme.text-faint;
+                        font-size: 10.5px * root.zoom;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
+
+                    // 输出端口：拖到别的节点的某一行（输入端口）上松手 = 连线
+                    Rectangle {
+                        x: (160px - 5px) * root.zoom;
+                        y: (12px - 5px) * root.zoom;
+                        width: 10px * root.zoom;
+                        height: 10px * root.zoom;
+                        border-radius: self.width / 2;
+                        border-width: 1px;
+                        border-color: Theme.node-edge;
+                        background: vop-out-ta.has-hover || (root.drag-active && root.drag-slot >= 0) ? Theme.accent
+                            : Theme.tcolor(n.tgroup);
+
+                        vop-out-ta := TouchArea {
+                            x: -6px;
+                            y: -6px;
+                            width: parent.width + 12px;
+                            height: parent.height + 12px;
+                            mouse-cursor: pointer;
+                            moved => {
+                                if (self.pressed && (root.drag-active
+                                    || abs(self.mouse-x - self.pressed-x) > 4px
+                                    || abs(self.mouse-y - self.pressed-y) > 4px)) {
+                                    root.drag-node = i;
+                                    root.drag-slot = -1;
+                                    root.drag-x = (n.x + 155px) * root.zoom + root.pan-x - 6px + self.mouse-x;
+                                    root.drag-y = (n.y + 7px) * root.zoom + root.pan-y - 6px + self.mouse-y;
+                                    root.drag-active = true;
+                                }
+                            }
+                            pointer-event(e) => {
+                                if (e.kind == PointerEventKind.cancel) {
+                                    root.drag-active = false;
+                                } else if (e.button == PointerEventButton.left && e.kind == PointerEventKind.up && root.drag-active) {
+                                    root.drag-active = false;
+                                    root.wire-dropped(i, -1, (root.drag-x - root.pan-x) / root.zoom,
+                                        (root.drag-y - root.pan-y) / root.zoom);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 输入端口：一行一个（名字 + 没连线时填的值）；左边沿的圆点往回拖 = 接别的节点进来，点一下已连的 = 断开
+                for p in root.vop-ports: port-row := Rectangle {
+                    property <NodeItem> n: root.nodes[p.node];
+                    x: self.n.x * root.zoom + root.pan-x;
+                    y: (self.n.y + 24px + p.slot * 18px) * root.zoom + root.pan-y;
+                    width: 160px * root.zoom;
+                    height: 18px * root.zoom;
+
+                    Text {
+                        x: 10px * root.zoom;
+                        width: parent.width * 0.45;
+                        text: p.label;
+                        color: p.wired ? Theme.text : Theme.text-muted;
+                        font-size: 10.5px * root.zoom;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        x: parent.width * 0.45 + 12px * root.zoom;
+                        width: parent.width * 0.55 - 20px * root.zoom;
+                        text: p.value;
+                        color: Theme.text-faint;
+                        font-size: 10px * root.zoom;
+                        font-family: "Consolas";
+                        overflow: elide;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+                    Rectangle {
+                        x: -5px * root.zoom;
+                        y: 4px * root.zoom;
+                        width: 10px * root.zoom;
+                        height: 10px * root.zoom;
+                        border-radius: self.width / 2;
+                        border-width: 1px;
+                        border-color: Theme.node-edge;
+                        background: port-ta.has-hover || (root.drag-active && root.drag-slot < 0) ? Theme.accent
+                            : (p.wired ? Theme.text-muted : Theme.node-cap);
+
+                        port-ta := TouchArea {
+                            x: -6px;
+                            y: -5px;
+                            width: parent.width + 12px;
+                            height: parent.height + 10px;
+                            mouse-cursor: pointer;
+                            moved => {
+                                if (self.pressed && (root.drag-active
+                                    || abs(self.mouse-x - self.pressed-x) > 4px
+                                    || abs(self.mouse-y - self.pressed-y) > 4px)) {
+                                    root.drag-node = p.node;
+                                    root.drag-slot = p.slot;
+                                    root.drag-x = (port-row.n.x - 5px) * root.zoom + root.pan-x - 6px + self.mouse-x;
+                                    root.drag-y = (port-row.n.y + 28px + p.slot * 18px) * root.zoom + root.pan-y - 5px
+                                        + self.mouse-y;
+                                    root.drag-active = true;
+                                }
+                            }
+                            pointer-event(e) => {
+                                if (e.kind == PointerEventKind.cancel) {
+                                    root.drag-active = false;
+                                } else if (e.button == PointerEventButton.left && e.kind == PointerEventKind.up) {
+                                    if (root.drag-active) {
+                                        root.drag-active = false;
+                                        root.wire-dropped(p.node, p.slot, (root.drag-x - root.pan-x) / root.zoom,
+                                            (root.drag-y - root.pan-y) / root.zoom);
+                                    } else if (p.wired) {
+                                        root.disconnect-input(p.node, p.slot);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 节点
+            if !root.vop: Rectangle {
+            x: 0px;
+            y: 0px;
+            width: canvas.width;
+            height: canvas.height;
+            for n[i] in root.nodes: Rectangle {
+                x: n.x * root.zoom + root.pan-x;
+                y: n.y * root.zoom + root.pan-y;
+                width: 112px * root.zoom;
+                height: 38px * root.zoom;
+
+                // 拖动 / 选中 / 中键看信息：盖住节点和右边的名字
+                node-ta := NodeTouch {
+                    x: 0px;
+                    y: 4px * root.zoom;
+                    width: (120px + max(60px, label.width / root.zoom)) * root.zoom;
+                    height: 30px * root.zoom;
+                    node-x: n.x;
+                    node-y: n.y + 4px;
+                    zoom: root.zoom;
+                    hover(x, y) => {
+                        if (!root.search-visible) {
+                            root.hover-x = n.x * root.zoom + root.pan-x + x;
+                            root.hover-y = (n.y + 4px) * root.zoom + root.pan-y + y;
+                        }
+                    }
+                    press(shift, ctrl, alt, x, y) => {
+                        root.add-menu-visible = false;
+                        root.search-visible = false;
+                        root.focus-area = 2;
+                        root.grab-focus();
+                        root.node-press(i, shift, ctrl, alt, x, y);
+                    }
+                    drag(x, y) => { root.node-drag(x, y); }
+                    release => { root.node-release(); }
+                    pan-by(dx, dy) => {
+                        root.pan-x += dx;
+                        root.pan-y += dy;
+                    }
+                    info(on) => { root.show-info(i, on); }
+                    menu(x, y) => { root.node-menu(i, n.x * root.zoom + root.pan-x + x, (n.y + 4px) * root.zoom + root.pan-y + y); }
+                    scroll-event(e) => {
+                        root.zoom-canvas(e.delta-y,
+                            n.x * root.zoom + root.pan-x + self.mouse-x,
+                            (n.y + 4px) * root.zoom + root.pan-y + self.mouse-y);
+                        accept
+                    }
+                    // expr 节点：双击进到里面
+                    double-clicked => { root.enter-node(i); }
+                }
+
+                // 选中：黄色的外框
+                if n.selected: Rectangle {
+                    x: -2px * root.zoom;
+                    y: 2px * root.zoom;
+                    width: 116px * root.zoom;
+                    height: 34px * root.zoom;
+                    border-radius: 7px * root.zoom;
+                    border-width: 2px;
+                    border-color: Theme.select;
+                }
+
+                // 节点本身：左端旁路、右端显示，中间分类图标
+                Rectangle {
+                    y: 4px * root.zoom;
+                    height: 30px * root.zoom;
+                    border-radius: 5px * root.zoom;
+                    border-width: 1px;
+                    border-color: node-ta.has-hover && !n.selected ? Theme.text-faint : Theme.node-edge;
+                    background: n.error ? Theme.danger.mix(Theme.node-bg, 0.3) : Theme.node-bg;
+                    opacity: n.bypass ? 0.75 : 1.0;
+                    clip: true;
+
+                    // 旁路旗标：点亮后这个节点不做事，输入原样传给下游
+                    Rectangle {
+                        x: 0px;
+                        width: 14px * root.zoom;
+                        background: n.bypass ? Theme.warn
+                            : (bypass-ta.has-hover ? Theme.warn.transparentize(0.5) : Theme.node-cap);
+                        Rectangle { x: parent.width - 1px; width: 1px; background: Theme.node-edge; }
+                        bypass-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.toggle-bypass(i); }
+                        }
+                    }
+
+                    Path {
+                        x: (112px - 16px) / 2 * root.zoom;
+                        y: 7px * root.zoom;
+                        width: 16px * root.zoom;
+                        height: 16px * root.zoom;
+                        viewbox-width: 24;
+                        viewbox-height: 24;
+                        commands: Icons.cat(n.cat);
+                        stroke: n.bypass ? Theme.text-faint : Theme.cat(n.cat);
+                        stroke-width: 1.8px * root.zoom;
+                        stroke-line-cap: round;
+                        stroke-line-join: round;
+                        fill: transparent;
+                    }
+
+                    // 显示旗标：表格显示这个节点的输出
+                    Rectangle {
+                        x: parent.width - self.width;
+                        width: 14px * root.zoom;
+                        background: n.display ? Theme.accent
+                            : (flag-ta.has-hover ? Theme.accent.transparentize(0.5) : Theme.node-cap);
+                        Rectangle { x: 0px; width: 1px; background: Theme.node-edge; }
+                        flag-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.set-display(i); }
+                        }
+                    }
+                }
+
+                // 旗标的说明：鼠标停在上面时出现在节点上方
+                if bypass-ta.has-hover || flag-ta.has-hover: Rectangle {
+                    x: bypass-ta.has-hover ? -6px : (112px - 34px) * root.zoom;
+                    y: -18px;
+                    width: tip.preferred-width + 10px;
+                    height: 16px;
+                    border-radius: 3px;
+                    background: Theme.surface-alt;
+                    tip := Text {
+                        text: bypass-ta.has-hover ? (n.bypass ? "取消旁路" : "旁路") : (n.display ? "正在显示" : "显示");
+                        color: bypass-ta.has-hover ? Theme.warn : Theme.accent;
+                        font-size: 10.5px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // 名字 + 来源标签 + 出错标记，下面一行是摘要
+                label := Rectangle {
+                    x: 120px * root.zoom;
+                    y: 3px * root.zoom;
+                    width: max(title-txt.preferred-width + (n.badge == "" ? 0px : badge.width + 6px * root.zoom)
+                        + (n.error ? 20px * root.zoom : 0px), sum-txt.preferred-width);
+                    height: 32px * root.zoom;
+
+                    title-txt := Text {
+                        x: 0px;
+                        y: 0px;
+                        height: 16px * root.zoom;
+                        text: n.title;
+                        color: n.selected ? Theme.select : (n.bypass ? Theme.text-faint : Theme.text);
+                        font-size: 12px * root.zoom;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                    // 来源标签：盖住了内置的同名节点 / 节点自己加了参数（定义不是自带的那份）
+                    badge := Rectangle {
+                        visible: n.badge != "";
+                        x: title-txt.preferred-width + 6px * root.zoom;
+                        y: 1px * root.zoom;
+                        width: badge-txt.preferred-width + 10px * root.zoom;
+                        height: 14px * root.zoom;
+                        border-radius: self.height / 2;
+                        background: n.badge == "私有参数" ? Theme.cat(2).transparentize(0.7) : Theme.warn.transparentize(0.65);
+                        badge-txt := Text {
+                            text: n.badge;
+                            color: Theme.text;
+                            font-size: 9.5px * root.zoom;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    if n.error: Rectangle {
+                        x: title-txt.preferred-width + (n.badge == "" ? 6px * root.zoom : badge.width + 12px * root.zoom);
+                        y: 1px * root.zoom;
+                        width: 14px * root.zoom;
+                        height: 14px * root.zoom;
+                        border-radius: self.width / 2;
+                        background: Theme.danger;
+                        Text {
+                            text: "!";
+                            color: Theme.surface;
+                            font-size: 10px * root.zoom;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    sum-txt := Text {
+                        x: 0px;
+                        y: 16px * root.zoom;
+                        height: 14px * root.zoom;
+                        width: min(self.preferred-width, 240px * root.zoom);
+                        text: n.bypass ? "已旁路" : n.summary;
+                        color: n.error ? Theme.danger : Theme.text-faint;
+                        font-size: 10.5px * root.zoom;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // 输入端口：从这里往回拖到别的节点上 = 把那个节点接进来；点一下已连的端口 = 断开
+                for s in n.inputs: Rectangle {
+                    x: (root.port-x(n.inputs, s) - 6px) * root.zoom;
+                    y: 0px;
+                    width: 12px * root.zoom;
+                    height: 4px * root.zoom;
+                    border-radius: 3px * root.zoom;
+                    background: in-ta.has-hover || root.connect-from >= 0
+                        || (root.drag-active && root.drag-slot < 0) ? Theme.accent
+                        : (n.selected ? Theme.select : Theme.port);
+
+                    in-ta := TouchArea {
+                        x: -6px;
+                        y: -8px;
+                        width: parent.width + 12px;
+                        height: parent.height + 12px;
+                        mouse-cursor: pointer;
+                        moved => {
+                            if (self.pressed && (root.drag-active
+                                || abs(self.mouse-x - self.pressed-x) > 4px
+                                || abs(self.mouse-y - self.pressed-y) > 4px)) {
+                                root.drag-node = i;
+                                root.drag-slot = s;
+                                root.drag-x = (n.x + root.port-x(n.inputs, s) - 6px) * root.zoom
+                                    + root.pan-x - 6px + self.mouse-x;
+                                root.drag-y = n.y * root.zoom + root.pan-y - 8px + self.mouse-y;
+                                root.drag-active = true;
+                            }
+                        }
+                        pointer-event(e) => {
+                            if (e.kind == PointerEventKind.cancel) {
+                                root.drag-active = false;
+                            } else if (e.button == PointerEventButton.left && e.kind == PointerEventKind.up) {
+                                if (root.drag-active) {
+                                    root.drag-active = false;
+                                    root.wire-dropped(i, s, (root.drag-x - root.pan-x) / root.zoom,
+                                        (root.drag-y - root.pan-y) / root.zoom);
+                                } else if (root.connect-from >= 0) {
+                                    root.connect-nodes(root.connect-from, i, s);
+                                    root.connect-from = -1;
+                                } else {
+                                    root.disconnect-input(i, s);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 输出端口：拖到另一个节点（或它的某个输入端口）上松手 = 连线
+                Rectangle {
+                    x: 50px * root.zoom;
+                    y: 34px * root.zoom;
+                    width: 12px * root.zoom;
+                    height: 4px * root.zoom;
+                    border-radius: 3px * root.zoom;
+                    background: out-ta.has-hover || root.connect-from == i
+                        || (root.drag-active && root.drag-slot >= 0) ? Theme.accent
+                        : (n.selected ? Theme.select : Theme.port);
+
+                    out-ta := TouchArea {
+                        x: -6px;
+                        y: -4px;
+                        width: parent.width + 12px;
+                        height: parent.height + 12px;
+                        mouse-cursor: pointer;
+                        moved => {
+                            if (self.pressed && (root.drag-active
+                                || abs(self.mouse-x - self.pressed-x) > 4px
+                                || abs(self.mouse-y - self.pressed-y) > 4px)) {
+                                root.drag-node = i;
+                                root.drag-slot = -1;
+                                root.drag-x = (n.x + 50px) * root.zoom + root.pan-x - 6px + self.mouse-x;
+                                root.drag-y = (n.y + 34px) * root.zoom + root.pan-y - 4px + self.mouse-y;
+                                root.drag-active = true;
+                            }
+                        }
+                        pointer-event(e) => {
+                            if (e.kind == PointerEventKind.cancel) {
+                                root.drag-active = false;
+                            } else if (e.button == PointerEventButton.left && e.kind == PointerEventKind.up) {
+                                if (root.drag-active) {
+                                    root.drag-active = false;
+                                    root.wire-dropped(i, -1, (root.drag-x - root.pan-x) / root.zoom,
+                                        (root.drag-y - root.pan-y) / root.zoom);
+                                } else {
+                                    // 没拖动的点击：老办法，再点一个输入端口完成连线
+                                    root.connect-from = root.connect-from == i ? -1 : i;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            }
+
+            // 正在拖的线：一头在起点端口，一头跟着鼠标
+            if root.drag-active: Path {
+                property <bool> from-output: root.drag-slot < 0;
+                property <NodeItem> n: root.nodes[root.drag-node];
+                property <float> px: ((self.from-output ? root.out-x(self.n) : root.in-x(self.n, root.drag-slot))
+                    * root.zoom + root.pan-x) / 1px;
+                property <float> py: ((self.from-output ? root.out-y(self.n) : root.in-y(self.n, root.drag-slot))
+                    * root.zoom + root.pan-y) / 1px;
+                property <float> x1: self.from-output ? self.px : root.drag-x / 1px;
+                property <float> y1: self.from-output ? self.py : root.drag-y / 1px;
+                property <float> x2: self.from-output ? root.drag-x / 1px : self.px;
+                property <float> y2: self.from-output ? root.drag-y / 1px : self.py;
+                x: 0px;
+                y: 0px;
+                width: canvas.width;
+                height: canvas.height;
+                viewbox-width: canvas.width / 1px;
+                viewbox-height: canvas.height / 1px;
+                clip: true;
+                commands: root.wire-path(self.x1, self.y1, self.x2, self.y2);
+                stroke: Theme.accent;
+                stroke-width: 2px;
+                stroke-line-cap: round;
+                fill: transparent;
+            }
+
+            // 框选的框
+            if pan-ta.boxing: Rectangle {
+                x: min(pan-ta.pressed-x, pan-ta.mouse-x);
+                y: min(pan-ta.pressed-y, pan-ta.mouse-y);
+                width: abs(pan-ta.mouse-x - pan-ta.pressed-x);
+                height: abs(pan-ta.mouse-y - pan-ta.pressed-y);
+                background: pan-ta.box-mode == 2 ? Theme.danger.transparentize(0.88) : Theme.accent.transparentize(0.88);
+                border-width: 1px;
+                border-color: pan-ta.box-mode == 2 ? Theme.danger : Theme.accent;
+            }
+
+            // 按着 Y 拖出来的剪线轨迹
+            if root.cut-trail != "": Path {
+                x: 0px;
+                y: 0px;
+                width: canvas.width;
+                height: canvas.height;
+                viewbox-width: canvas.width / 1px;
+                viewbox-height: canvas.height / 1px;
+                clip: true;
+                commands: root.cut-trail;
+                stroke: Theme.danger;
+                stroke-width: 2px;
+                stroke-line-cap: round;
+                stroke-line-join: round;
+                fill: transparent;
+            }
+
+            // 按着空格 / Y 时盖在最上面：左键拖 = 平移 / 剪线（点在节点上也一样）
+            if root.space-down || root.cut-mode: TouchArea {
+                property <length> start-x;
+                property <length> start-y;
+                mouse-cursor: root.cut-mode ? MouseCursor.crosshair : MouseCursor.move;
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.move) {
+                        root.hover-x = self.mouse-x;
+                        root.hover-y = self.mouse-y;
+                    } else if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                        root.focus-area = 2;
+                        if (root.cut-mode) {
+                            root.cut-trail = "M " + self.mouse-x / 1px + " " + self.mouse-y / 1px;
+                            root.cut-point((self.mouse-x - root.pan-x) / root.zoom, (self.mouse-y - root.pan-y) / root.zoom);
+                        } else {
+                            self.start-x = root.pan-x;
+                            self.start-y = root.pan-y;
+                        }
+                    } else if ((e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) && root.cut-trail != "") {
+                        root.cut-trail = "";
+                        root.cut-end();
+                    }
+                }
+                moved => {
+                    if (!self.pressed) {
+                    } else if (root.cut-mode) {
+                        if (root.cut-trail != "") {
+                            root.cut-trail += " L " + self.mouse-x / 1px + " " + self.mouse-y / 1px;
+                            root.cut-point((self.mouse-x - root.pan-x) / root.zoom, (self.mouse-y - root.pan-y) / root.zoom);
+                        }
+                    } else {
+                        root.pan-x = self.start-x + self.mouse-x - self.pressed-x;
+                        root.pan-y = self.start-y + self.mouse-y - self.pressed-y;
+                    }
+                }
+                scroll-event(e) => {
+                    root.zoom-canvas(e.delta-y, self.mouse-x, self.mouse-y);
+                    accept
+                }
+            }
+
+            // 右键菜单（节点 / 空白处 / 连线），快捷键写在右边
+            ctx-menu := PopupWindow {
+                x: root.menu-x;
+                y: root.menu-y;
+                width: 230px;
+                MenuPanel {
+                    // ---- 节点
+                    if root.menu-kind == 1 && !root.vop && root.menu-node >= 0: MenuEntry {
+                        label: "显示";
+                        keys: "R";
+                        checked: root.nodes[root.menu-node].display;
+                        activated => { root.command("display"); ctx-menu.close(); }
+                    }
+                    if root.menu-kind == 1 && !root.vop && root.menu-node >= 0: MenuEntry {
+                        label: "旁路";
+                        keys: "Q";
+                        checked: root.nodes[root.menu-node].bypass;
+                        activated => { root.command("bypass"); ctx-menu.close(); }
+                    }
+                    if root.menu-kind == 1 && root.node-net: MenuEntry {
+                        label: "进入网络";
+                        keys: "回车";
+                        activated => { root.enter-node(-1); ctx-menu.close(); }
+                    }
+                    if root.menu-kind == 1 && root.node-text-action > 0: MenuEntry {
+                        label: root.node-text-action == 1 ? "转成文字" : "展开成节点";
+                        activated => { root.text-action(); ctx-menu.close(); }
+                    }
+                    if root.menu-kind == 1: MenuEntry {
+                        label: "帮助";
+                        keys: "F1";
+                        activated => { root.selected-help(); ctx-menu.close(); }
+                    }
+                    if root.menu-kind == 1: MenuSeparator2 {}
+                    if root.menu-kind == 1: MenuEntry {
+                        label: "复制";
+                        keys: "Ctrl+C";
+                        activated => { root.command("copy"); ctx-menu.close(); }
+                    }
+                    if root.menu-kind == 1: MenuEntry {
+                        label: "剪切";
+                        keys: "Ctrl+X";
+                        activated => { root.command("cut"); ctx-menu.close(); }
+                    }
+                    if root.menu-kind == 1: MenuEntry {
+                        label: "复制一份";
+                        keys: "Alt+拖";
+                        activated => { root.command("duplicate"); ctx-menu.close(); }
+                    }
+                    if root.menu-kind == 1: MenuEntry {
+                        label: "删除";
+                        keys: "Delete";
+                        activated => { root.delete-selection(); ctx-menu.close(); }
+                    }
+                    if root.menu-kind == 1: MenuSeparator2 {}
+                    if root.menu-kind == 1: MenuEntry {
+                        label: "排列选中的";
+                        keys: "L";
+                        activated => { root.command("layout"); ctx-menu.close(); }
+                    }
+                    // ---- 空白处
+                    if root.menu-kind == 0: MenuEntry {
+                        label: "添加节点…";
+                        keys: "Tab";
+                        activated => { root.open-search(); ctx-menu.close(); }
+                    }
+                    if root.menu-kind == 0: MenuEntry {
+                        label: "粘贴";
+                        keys: "Ctrl+V";
+                        activated => { root.command("paste"); ctx-menu.close(); }
+                    }
+                    if root.menu-kind == 0: MenuEntry {
+                        label: "全选";
+                        keys: "Ctrl+A";
+                        activated => { root.command("select-all"); ctx-menu.close(); }
+                    }
+                    if root.menu-kind == 0: MenuSeparator2 {}
+                    if root.menu-kind == 0: MenuEntry {
+                        label: "排列全部";
+                        keys: "L";
+                        activated => { root.command("layout-all"); ctx-menu.close(); }
+                    }
+                    if root.menu-kind == 0: MenuEntry {
+                        label: "看全部";
+                        keys: "H";
+                        activated => { root.fit-view(canvas.width, canvas.height, false); ctx-menu.close(); }
+                    }
+                    if root.menu-kind == 0: MenuEntry {
+                        label: "看选中的";
+                        keys: "G";
+                        activated => { root.fit-view(canvas.width, canvas.height, true); ctx-menu.close(); }
+                    }
+                    if root.menu-kind == 0 && root.vop: MenuEntry {
+                        label: "回到上一级";
+                        keys: "U";
+                        activated => { root.go-up(); ctx-menu.close(); }
+                    }
+                    // ---- 连线
+                    if root.menu-kind == 2: MenuEntry {
+                        label: "插入节点…";
+                        keys: "Tab";
+                        activated => { root.open-search(); ctx-menu.close(); }
+                    }
+                    if root.menu-kind == 2: MenuEntry {
+                        label: "删除连线";
+                        keys: "Delete";
+                        activated => { root.delete-selection(); ctx-menu.close(); }
+                    }
+                }
+            }
+
+            // 中键信息窗：节点输出的行列、用时、输入、各列类型（表达式网络里是输出类型和接了什么）
+            if root.info-visible && root.info-node < root.nodes.length: info-pop := Rectangle {
+                property <NodeItem> n: root.nodes[root.info-node];
+                x: max(6px, min(self.n.x * root.zoom + root.pan-x + 30px, canvas.width - self.width - 6px));
+                y: max(6px, min((self.n.y + (root.vop ? root.vop-h(self.n.inputs) : 40px)) * root.zoom + root.pan-y + 4px,
+                    canvas.height - self.height - 6px));
+                width: min(320px, canvas.width - 12px);
+                height: info-col.preferred-height;
+                background: Theme.surface-alt;
+                border-width: 1px;
+                border-color: Theme.border-strong;
+                border-radius: 4px;
+                drop-shadow-blur: 16px;
+                drop-shadow-offset-y: 4px;
+                drop-shadow-color: Theme.shadow;
+
+                info-col := VerticalLayout {
+                    padding: 12px;
+                    padding-top: 10px;
+                    spacing: 6px;
+                    Text {
+                        text: root.info-text;
+                        color: Theme.text-muted;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+
+            if root.nodes.length == 0: Text {
+                text: root.net-hint != "" ? root.net-hint : root.vop ? "表达式网络是空的 · 按 Tab 搜索添加表达式节点" : "打开文件后这里会出现源节点 · 按 Tab 搜索添加节点";
+                wrap: word-wrap;
+                color: Theme.text-faint;
+                font-size: 12px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            if root.wire-selected && root.connect-from < 0 && !root.drag-active: Rectangle {
+                y: parent.height - 26px;
+                height: 26px;
+                background: Theme.surface-alt;
+                Text {
+                    text: "已选中连线 · Delete 删除（节点保留）· Tab 插入节点 · 点空白处取消";
+                    color: Theme.text-muted;
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            if root.connect-from >= 0: Rectangle {
+                y: parent.height - 26px;
+                height: 26px;
+                background: Theme.accent-soft;
+                Text {
+                    text: "点击另一个节点上沿的输入端口完成连线，Esc 取消";
+                    color: Theme.accent;
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            // Tab 菜单：在鼠标处搜节点（名字 / polars 方法 / 说明），↑↓ 选，回车添加，Esc 关闭。
+            // 一直在、只是不显示：放进 if 里的话会在自己的按键回调里被销毁
+            Card {
+                property <length> row-h: 38px;
+                property <length> list-h: min(root.search-results.length, 7) * self.row-h;
+                property <int> current: root.search-index;
+                property <bool> open: root.search-visible;
+                visible: root.search-visible;
+                x: max(6px, min(root.hover-x, canvas.width - self.width - 6px));
+                y: max(6px, min(root.hover-y, canvas.height - self.height - 6px));
+                width: min(300px, canvas.width - 12px);
+                height: 44px + max(self.list-h, 34px);
+                border-radius: 8px;
+
+                changed open => {
+                    if (self.open) {
+                        search-input.text = "";
+                        search-list.content-y = 0px;
+                        search-input.focus();
+                    }
+                }
+                // 键盘移动选中项：滚到看得见的位置
+                changed current => {
+                    if (self.current * self.row-h + search-list.content-y < 0px) {
+                        search-list.content-y = -self.current * self.row-h;
+                    } else if ((self.current + 1) * self.row-h + search-list.content-y > self.list-h) {
+                        search-list.content-y = self.list-h - (self.current + 1) * self.row-h;
+                    }
+                }
+
+                // 吃掉落在菜单空白处的点击和滚轮，不传给下面的画布
+                TouchArea {
+                    scroll-event(e) => { accept }
+                }
+
+                Rectangle {
+                    x: 6px;
+                    y: 6px;
+                    width: parent.width - 12px;
+                    height: 30px;
+                    border-radius: 6px;
+                    border-width: 1px;
+                    border-color: Theme.accent;
+                    background: Theme.surface;
+
+                    if search-input.text == "" && search-input.preedit-text == "": Text {
+                        x: 9px;
+                        width: parent.width - 18px;
+                        text: "搜索节点：名字 / polars 方法 / 说明";
+                        color: Theme.text-faint;
+                        font-size: 13px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    search-input := TextInput {
+                        x: 9px;
+                        width: parent.width - 18px;
+                        height: parent.height;
+                        color: Theme.text;
+                        font-size: 13px;
+                        single-line: true;
+                        vertical-alignment: center;
+
+                        edited => {
+                            root.search-index = 0;
+                            search-list.content-y = 0px;
+                            root.search-nodes(self.text);
+                        }
+                        key-pressed(e) => {
+                            if (e.text == Key.DownArrow || e.text == Key.UpArrow) {
+                                if (root.search-results.length > 0) {
+                                    root.search-index = mod(root.search-index
+                                        + (e.text == Key.DownArrow ? 1 : root.search-results.length - 1),
+                                        root.search-results.length);
+                                }
+                                return accept;
+                            }
+                            if (e.text == Key.Return) {
+                                if (root.search-results.length > 0) {
+                                    root.pick-found(root.search-index);
+                                }
+                                return accept;
+                            }
+                            if (e.text == Key.Escape || e.text == Key.Tab) {
+                                root.close-search();
+                                return accept;
+                            }
+                            reject
+                        }
+                        // 点了别处：关掉
+                        changed has-focus => {
+                            if (!self.has-focus && root.search-visible) {
+                                root.search-visible = false;
+                            }
+                        }
+                    }
+                }
+
+                search-list := ListView {
+                    x: 4px;
+                    y: 40px;
+                    width: parent.width - 8px;
+                    height: parent.list-h;
+
+                    for k[ki] in root.search-results: Rectangle {
+                        height: 38px;
+                        border-radius: 6px;
+                        background: ki == root.search-index ? Theme.accent-soft
+                            : (found-ta.has-hover ? Theme.hover : transparent);
+
+                        found-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.pick-found(ki); }
+                            pointer-event(e) => {
+                                if (e.button == PointerEventButton.middle && e.kind == PointerEventKind.down) {
+                                    root.kind-help(0, ki, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                                }
+                            }
+                        }
+                        Path {
+                            x: 9px;
+                            y: 11px;
+                            width: 16px;
+                            height: 16px;
+                            viewbox-width: 24;
+                            viewbox-height: 24;
+                            commands: Icons.cat(k.cat);
+                            stroke: Theme.cat(k.cat);
+                            stroke-width: 1.8px;
+                            stroke-line-cap: round;
+                            stroke-line-join: round;
+                            fill: transparent;
+                        }
+                        Text {
+                            x: 34px;
+                            y: 3px;
+                            width: parent.width - 42px;
+                            height: 18px;
+                            text: k.name;
+                            color: ki == root.search-index ? Theme.accent : Theme.text;
+                            font-size: 13px;
+                            font-weight: 600;
+                            overflow: elide;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            x: 34px;
+                            y: 20px;
+                            width: parent.width - 42px;
+                            height: 15px;
+                            text: k.desc;
+                            color: Theme.text-faint;
+                            font-size: 11px;
+                            overflow: elide;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                if root.search-results.length == 0: Text {
+                    y: 40px;
+                    height: 34px;
+                    text: "没有匹配的节点";
+                    color: Theme.text-faint;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+
+    // 添加节点菜单：左边分类（对应 polars 文档的章节），右边是这一类的节点
+    if root.add-menu-visible: Card {
+        x: 8px;
+        y: net-pane.y + 58px;
+        width: parent.width - 16px;
+        height: min(net-pane.height - 64px, 336px);
+
+        // 吃掉落在菜单空白处的点击和滚轮，不传给下面的画布
+        TouchArea {
+            scroll-event(e) => { accept }
+        }
+
+        HorizontalLayout {
+            padding: 6px;
+            spacing: 6px;
+
+            // 表达式节点的分类多：分类列表也能滚动
+            ScrollView {
+                width: 124px;
+            VerticalLayout {
+                alignment: start;
+                spacing: 2px;
+                padding-right: 10px;
+
+                for c[ci] in root.node-cats: Rectangle {
+                    height: 32px;
+                    border-radius: 6px;
+                    background: ci == root.add-cat ? Theme.accent-soft
+                        : (cat-ta.has-hover ? Theme.hover : transparent);
+
+                    cat-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.add-cat = ci; }
+                    }
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 6px;
+                        spacing: 8px;
+
+                        VerticalLayout {
+                            alignment: center;
+                            Path {
+                                width: 15px;
+                                height: 15px;
+                                viewbox-width: 24;
+                                viewbox-height: 24;
+                                commands: Icons.cat(root.node-cat-icons[ci]);
+                                stroke: Theme.cat(root.node-cat-icons[ci]);
+                                stroke-width: 1.8px;
+                                stroke-line-cap: round;
+                                stroke-line-join: round;
+                                fill: transparent;
+                            }
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: c;
+                            color: ci == root.add-cat ? Theme.accent : Theme.text;
+                            font-size: 12.5px;
+                            font-weight: ci == root.add-cat ? 600 : 400;
+                            overflow: elide;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+            }
+
+            Rectangle {
+                width: 1px;
+                background: Theme.border;
+            }
+
+            ScrollView {
+                horizontal-stretch: 1;
+
+                VerticalLayout {
+                    alignment: start;
+
+                    // 不属于当前分类的项高度为 0（for 里不能再套 if 过滤）
+                    for k[ki] in root.node-kinds: Rectangle {
+                        visible: k.cat == root.add-cat;
+                        height: k.cat == root.add-cat ? 40px : 0px;
+                        border-radius: 6px;
+                        background: kind-ta.has-hover ? Theme.hover : transparent;
+
+                        kind-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.add-menu-visible = false;
+                                root.add-node(ki);
+                            }
+                            pointer-event(e) => {
+                                if (e.button == PointerEventButton.middle && e.kind == PointerEventKind.down) {
+                                    root.kind-help(1, ki, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                                }
+                            }
+                        }
+                        VerticalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            alignment: center;
+                            spacing: 1px;
+                            Text {
+                                text: k.name;
+                                color: Theme.text;
+                                font-size: 13px;
+                                font-weight: 600;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: k.desc;
+                                color: Theme.text-faint;
+                                font-size: 11px;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
