@@ -1,7 +1,7 @@
 // 主窗口：菜单栏 + 工具架 + 主区域（表格面板、节点面板，中间的缝可拖动）+ 状态栏 + 浮层（右键菜单、代码补全）。
 // 界面的全部状态声明在这里，Rust 只和这个组件打交道；两个面板是各自文件里的组件。
 import { ListView, Palette, Button, LineEdit, ComboBox } from "std-widgets.slint";
-import { Theme, ColumnSpec, RowData, NodeItem, WireItem, CompletionItem, CodeEdit, ParamItem, KindItem, PortItem, HelpBlock, RecentItem } from "theme.slint";
+import { Theme, ColumnSpec, RowData, NodeItem, WireItem, CompletionItem, CodeEdit, ParamItem, KindItem, PortItem, HelpBlock, RecentItem, CondRow } from "theme.slint";
 import { Card, MenuRow, CheckBox } from "widgets.slint";
 import { TablePanel } from "table-panel.slint";
 import { NodePanel } from "node-panel.slint";
@@ -10,9 +10,11 @@ import { HelpWindow } from "help.slint";
 import { MenuTitle, MenuEntry, MenuSeparator2, MenuPanel } from "menubar.slint";
 import { TypeEditor, TypeEdit, EdParam, EdDetail, EdType, EdSource, EdRef } from "type-editor.slint";
 import { PickPopup, ColPick, PickCol, PickRow, RangePick, RangePopup, RangeRow } from "pick.slint";
-export { ColumnSpec, RowData, NodeItem, WireItem, CompletionItem, CodeEdit, ParamItem, KindItem, PortItem, HelpBlock, RecentItem }
+import { CondPopup, CondPick } from "cond.slint";
+export { ColumnSpec, RowData, NodeItem, WireItem, CompletionItem, CodeEdit, ParamItem, KindItem, PortItem, HelpBlock, RecentItem, CondRow }
 export { TypeEdit, EdParam, EdDetail, EdType, EdSource, EdRef }
 export { ColPick, PickCol, PickRow, RangePick, RangeRow }
+export { CondPick }
 
 export component AppWindow inherits Window {
     title: (root.modified ? "● " : "") + (root.project-name == "" ? "" : root.project-name + " · ")
@@ -855,6 +857,7 @@ export component AppWindow inherits Window {
                     RangePick.anchor-y = a2;
                     ColPick.open-param(a0);
                 }
+                open-cond(a0) => { CondPick.open-param(a0); }
                 node-press(a0, a1, a2, a3, a4, a5) => { root.node-press(a0, a1, a2, a3, a4, a5); }
                 node-drag(a0, a1) => { root.node-drag(a0, a1); }
                 node-release => { root.node-release(); }
@@ -1014,6 +1017,18 @@ export component AppWindow inherits Window {
             background: Theme.shadow.transparentize(0.6);
         }
         if RangePick.open: RangePopup {
+            avail-w: key-scope.width;
+            avail-h: key-scope.height;
+        }
+
+        // 筛选条件编辑器（筛选节点的“筛选条件”参数）：同选列框，开着时别处点不了，Esc / 取消 / ✕ 关
+        if CondPick.open: TouchArea {
+            scroll-event(e) => { EventResult.accept }
+        }
+        if CondPick.open: Rectangle {
+            background: Theme.shadow.transparentize(0.6);
+        }
+        if CondPick.open: CondPopup {
             avail-w: key-scope.width;
             avail-h: key-scope.height;
         }

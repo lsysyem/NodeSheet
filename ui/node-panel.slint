@@ -175,6 +175,7 @@ export component NodePanel inherits Rectangle {
     callback param-action(int);
     callback param-browse(int);
     callback open-pick(int, length, length);   // 参数旁边的“选列”：参数下标、按钮右下角（主区域里的坐标）
+    callback open-cond(int);                   // 筛选条件参数：打开条件编辑器（cond.rs）
     callback param-edited(int, string);
     callback param-picked(int, int);
     callback param-toggled(int, bool);
@@ -576,6 +577,43 @@ export component NodePanel inherits Rectangle {
                             model: p.options;
                             current-index: p.index;
                             selected(value) => { root.param-picked(p.id, self.current-index); }
+                        }
+
+                        // 筛选条件：这一行是条件的一句话，点它（或“编辑”）打开条件编辑器（cond.rs）
+                        if p.kind == 9: HorizontalLayout {
+                            spacing: 6px;
+
+                            cond-box := Rectangle {
+                                horizontal-stretch: 1;
+                                height: 26px;
+                                border-radius: 3px;
+                                background: cond-ta.has-hover ? Theme.hover : Theme.surface-alt;
+                                border-width: 1px;
+                                border-color: cond-ta.has-hover ? Theme.focus : Theme.border;
+
+                                Text {
+                                    x: 8px;
+                                    width: cond-box.width - 16px;
+                                    text: p.value == "" ? "点“编辑”搭条件（列 + 操作 + 值，可分组）" : p.value;
+                                    color: p.value == "" ? Theme.text-faint : Theme.text;
+                                    font-size: 12px;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                }
+                                cond-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.open-cond(p.id); }
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                IconButton {
+                                    small: true;
+                                    icon: Icons.filter;
+                                    label: "编辑";
+                                    clicked => { root.open-cond(p.id); }
+                                }
+                            }
                         }
 
                         if p.kind == 1: VerticalLayout {

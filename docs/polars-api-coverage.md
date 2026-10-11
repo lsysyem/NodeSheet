@@ -28,7 +28,7 @@ SQL 的语句和函数（文档的 SQL Interface → SQL Clauses / SQL Functions
 | `DataFrame.explode` | 有节点 | `explode` 节点 |
 | `DataFrame.fill_nan` | 有节点 | `fill_null` 节点（fill_nan） |
 | `DataFrame.fill_null` | 有节点 | `fill_null` 节点 |
-| `DataFrame.filter` | 有节点 | `condition` 节点、`expr` 节点（filter） |
+| `DataFrame.filter` | 有节点 | `condition` 节点、`expr` 节点（filter）、`filter` 节点（留下满足的） |
 | `DataFrame.gather` | 有节点 | `slice` 节点（gather） |
 | `DataFrame.gather_every` | 有节点 | `slice` 节点（gather_every） |
 | `DataFrame.group_by` | 有节点 | `expr` 节点（group_by）、`key` 节点 |
@@ -41,7 +41,7 @@ SQL 的语句和函数（文档的 SQL Interface → SQL Clauses / SQL Functions
 | `DataFrame.match_to_schema` | 有节点 | `cast_columns` 节点（方式 match_to_schema） |
 | `DataFrame.merge_sorted` | 有节点 | `concat` 节点（merge_sorted） |
 | `DataFrame.pivot` | 有节点 | `pivot` 节点 |
-| `DataFrame.remove` | 有节点 | `expr` 节点（去掉满足的） |
+| `DataFrame.remove` | 有节点 | `expr` 节点（去掉满足的）、`filter` 节点（去掉满足的） |
 | `DataFrame.rename` | 有节点 | `rename` 节点 |
 | `DataFrame.reverse` | 有节点 | `slice` 节点（reverse） |
 | `DataFrame.rolling` | 有节点 | `expr` 节点：上下文 group_by，分组后 agg，填“滚动窗口” |

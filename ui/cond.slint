@@ -1,0 +1,438 @@
+// 筛选节点的条件编辑器（cond.rs）：一列 + 一个操作 + 一个值算一个条件；条件之间“且 / 或”（点左边那个小方块换），
+// 还能分组——分组占一行，组里的条件缩进在它下面，组里单独选“且 / 或”。
+// 状态全在 Rust，这里只画、只报。
+import { LineEdit, ComboBox, ScrollView, Button } from "std-widgets.slint";
+import { Theme, Icons, CondRow } from "theme.slint";
+import { Card, IconButton } from "widgets.slint";
+
+export global CondPick {
+    in-out property <bool> open;
+    in property <string> title;             // 节点名 · 参数标签
+    in property <[CondRow]> rows;
+    in property <[string]> col-names;       // 列（上游的表结构，引擎推的）
+    in property <bool> typing;              // 列列表还没拿到：列名自己写
+    in-out property <int> root-join;        // 最外面一层：0 且 / 1 或
+    in property <string> summary;           // 条件的一句话 + 个数
+    in property <string> preview;           // 写成 polars 表达式是什么样
+    in property <string> note;              // 提示（读不回来、分组套太多…）
+    in property <length> list-height;       // 条件表要多高（Rust 按行数算，免得布局套来套去）
+    // 拖动 / 拽过之后的位置和大小（0 = 没挪过：居中；每次开都重新居中）
+    in-out property <length> box-x;
+    in-out property <length> box-y;
+    in-out property <length> box-w;
+    in-out property <length> box-h;
+
+    callback open-param(int);
+    callback cancel();
+    callback accept();
+    callback set-root-join(int);
+    callback group-join(int, int);
+    callback row-join(int);
+    callback row-col(int, int);
+    callback row-col-text(int, string);
+    callback row-op(int, int);
+    callback row-value(int, string);
+    callback row-type(int, int);
+    callback row-del(int);
+    callback row-add(int);                  // 往这一组里加一个条件（-1 = 最外面一层）
+    callback group-add(int);                // 往这一组里加一个分组
+    callback clear();
+}
+
+// 小号的文字按钮（+ 条件 / 清空…）
+component TinyButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> active: false;
+    callback clicked();
+
+    height: 22px;
+    min-width: txt.preferred-width + 14px;
+    border-radius: 4px;
+    background: root.active ? Theme.accent-soft : (ta.pressed ? Theme.pressed : (ta.has-hover ? Theme.hover : Theme.surface-alt));
+    border-width: 1px;
+    border-color: root.active ? Theme.accent : Theme.border;
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    txt := Text {
+        text: root.text;
+        color: root.active ? Theme.accent : Theme.text-muted;
+        font-size: 12px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// 条件左边那个“且 / 或”：点一下换
+component JoinButton inherits Rectangle {
+    in property <int> join;     // 0 且 / 1 或
+    callback clicked();
+
+    height: 24px;
+    width: 30px;
+    border-radius: 4px;
+    background: ta.pressed ? Theme.pressed : (ta.has-hover ? Theme.hover : Theme.surface-alt);
+    border-width: 1px;
+    border-color: root.join == 1 ? Theme.warn : Theme.border;
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    Text {
+        text: root.join == 1 ? "或" : "且";
+        color: root.join == 1 ? Theme.warn : Theme.text-muted;
+        font-size: 12px;
+        font-weight: root.join == 1 ? 700 : 400;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// 条件表里的一行：条件（两行）或分组（一行，组头）
+component RowView inherits Rectangle {
+    in property <CondRow> item;
+    height: root.item.kind == 0 ? 74px : 38px;
+
+    // 缩进的竖线：分组套了几层就画几条（最多 5 层，和 cond.rs 的 MAX_DEPTH 对上）
+    if root.item.depth > 0: Rectangle { x: 5px; y: 1px; width: 1px; height: root.height - 2px; background: Theme.border-strong; }
+    if root.item.depth > 1: Rectangle { x: 21px; y: 1px; width: 1px; height: root.height - 2px; background: Theme.border-strong; }
+    if root.item.depth > 2: Rectangle { x: 37px; y: 1px; width: 1px; height: root.height - 2px; background: Theme.border-strong; }
+    if root.item.depth > 3: Rectangle { x: 53px; y: 1px; width: 1px; height: root.height - 2px; background: Theme.border-strong; }
+    if root.item.depth > 4: Rectangle { x: 69px; y: 1px; width: 1px; height: root.height - 2px; background: Theme.border-strong; }
+
+    body := Rectangle {
+        x: root.item.depth * 16px + 10px;
+        width: root.width - self.x;
+        height: root.height;
+        border-radius: 5px;
+        background: root.item.kind == 1 ? Theme.surface-alt.transparentize(0.5) : Theme.field;
+        border-width: 1px;
+        border-color: root.item.kind == 1 ? Theme.border-strong : Theme.border;
+
+        // ---- 条件
+        if root.item.kind == 0: VerticalLayout {
+            padding: 5px;
+            spacing: 4px;
+
+            HorizontalLayout {
+                spacing: 6px;
+                if !root.item.first: JoinButton {
+                    join: root.item.join;
+                    clicked => { CondPick.row-join(root.item.index); }
+                }
+                // 列：有列表就用下拉，还没拿到表结构就自己写
+                if CondPick.typing: LineEdit {
+                    horizontal-stretch: 1;
+                    text: root.item.col;
+                    placeholder-text: "列名";
+                    edited(text) => { CondPick.row-col-text(root.item.index, text); }
+                }
+                if !CondPick.typing: ComboBox {
+                    horizontal-stretch: 1;
+                    model: CondPick.col-names;
+                    current-index: root.item.col-index;
+                    selected => { CondPick.row-col(root.item.index, self.current-index); }
+                }
+                IconButton {
+                    small: true;
+                    icon: Icons.close;
+                    clicked => { CondPick.row-del(root.item.index); }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 6px;
+                padding-left: root.item.first ? 0px : 36px;
+
+                // 值按什么类型来：它决定下面能选哪些操作（文字 → 包含 / 开头是…，数字 → 大于 / 介于…）
+                ComboBox {
+                    width: 92px;
+                    model: root.item.type-options;
+                    current-index: root.item.type-index;
+                    selected => { CondPick.row-type(root.item.index, self.current-index); }
+                }
+                ComboBox {
+                    width: 150px;
+                    model: root.item.op-options;
+                    current-index: root.item.op;
+                    selected => { CondPick.row-op(root.item.index, self.current-index); }
+                }
+                if !root.item.valueless && root.item.value-options.length > 0: ComboBox {
+                    horizontal-stretch: 1;
+                    model: root.item.value-options;
+                    current-index: root.item.value-index;
+                    // 真 / 假：存进参数的就是 True / False
+                    selected => { CondPick.row-value(root.item.index, self.current-index == 0 ? "True" : "False"); }
+                }
+                if !root.item.valueless && root.item.value-options.length == 0: LineEdit {
+                    horizontal-stretch: 1;
+                    text: root.item.value;
+                    placeholder-text: root.item.value-hint;
+                    edited(text) => { CondPick.row-value(root.item.index, text); }
+                }
+                if root.item.valueless: Text {
+                    horizontal-stretch: 1;
+                    text: "这个操作不用填值";
+                    color: Theme.text-faint;
+                    font-size: 11.5px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // ---- 分组（组里的条件缩进在下面）
+        if root.item.kind == 1: HorizontalLayout {
+            padding-left: 5px;
+            padding-right: 5px;
+            spacing: 6px;
+
+            if !root.item.first: JoinButton {
+                join: root.item.join;
+                clicked => { CondPick.row-join(root.item.index); }
+            }
+            Text {
+                text: "分组";
+                color: Theme.text-muted;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+            TinyButton {
+                text: "且";
+                active: root.item.group-join == 0;
+                clicked => { CondPick.group-join(root.item.index, 0); }
+            }
+            TinyButton {
+                text: "或";
+                active: root.item.group-join == 1;
+                clicked => { CondPick.group-join(root.item.index, 1); }
+            }
+            Text {
+                horizontal-stretch: 1;
+                text: root.item.count;
+                color: Theme.text-faint;
+                font-size: 11.5px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            TinyButton {
+                text: "+ 条件";
+                clicked => { CondPick.row-add(root.item.index); }
+            }
+            TinyButton {
+                text: "+ 分组";
+                clicked => { CondPick.group-add(root.item.index); }
+            }
+            IconButton {
+                small: true;
+                icon: Icons.close;
+                clicked => { CondPick.row-del(root.item.index); }
+            }
+        }
+    }
+}
+
+export component CondPopup inherits Card {
+    // 放得下的地方（窗口的大小）
+    in property <length> avail-w;
+    in property <length> avail-h;
+
+    width: min(CondPick.box-w > 0px ? CondPick.box-w : 660px, root.avail-w - 16px);
+    height: min(CondPick.box-h > 0px ? CondPick.box-h : body.preferred-height + 24px, root.avail-h - 16px);
+    // 拖过就记住位置，没拖过居中（每次开都按现在的大小重新居中）
+    x: max(8px, min(CondPick.box-x > 0px ? CondPick.box-x : (root.avail-w - self.width) / 2, root.avail-w - self.width - 8px));
+    y: max(8px, min(CondPick.box-y > 0px ? CondPick.box-y : (root.avail-h - self.height) / 2, root.avail-h - self.height - 8px));
+
+    // 吃掉框里空白处的点击和滚轮，不传给下面
+    TouchArea {
+        scroll-event(e) => { EventResult.accept }
+    }
+
+    keys := FocusScope {
+        capture-key-pressed(e) => {
+            if (e.text == Key.Escape) {
+                CondPick.cancel();
+                return accept;
+            }
+            if (e.text == Key.Return && e.modifiers.control) {
+                CondPick.accept();
+                return accept;
+            }
+            reject
+        }
+        // 框里没用掉的键到这为止：别冒泡到主窗口（Delete 会删节点、Ctrl+Z 会撤销节点图）
+        key-pressed(e) => { accept }
+
+        body := VerticalLayout {
+            padding: 12px;
+            spacing: 8px;
+
+            // 标题：按住拖动，框跟着挪
+            Rectangle {
+                height: 26px;
+                head-ta := TouchArea {
+                    mouse-cursor: move;
+                    moved => {
+                        if (self.pressed) {
+                            CondPick.box-x = root.x + (self.mouse-x - self.pressed-x);
+                            CondPick.box-y = root.y + (self.mouse-y - self.pressed-y);
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: "筛选条件";
+                        color: Theme.text;
+                        font-size: 14px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: CondPick.title;
+                        color: Theme.text-muted;
+                        font-size: 12px;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
+                    IconButton {
+                        small: true;
+                        icon: Icons.close;
+                        clicked => { CondPick.cancel(); }
+                    }
+                }
+            }
+
+            // 最外面一层的关系 + 加条件
+            HorizontalLayout {
+                spacing: 6px;
+                Text {
+                    text: "所有条件里";
+                    color: Theme.text-muted;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+                TinyButton {
+                    text: "满足全部（且）";
+                    active: CondPick.root-join == 0;
+                    clicked => { CondPick.set-root-join(0); }
+                }
+                TinyButton {
+                    text: "满足任一（或）";
+                    active: CondPick.root-join == 1;
+                    clicked => { CondPick.set-root-join(1); }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                TinyButton {
+                    text: "+ 条件";
+                    clicked => { CondPick.row-add(-1); }
+                }
+                TinyButton {
+                    text: "+ 分组";
+                    clicked => { CondPick.group-add(-1); }
+                }
+                TinyButton {
+                    text: "清空";
+                    clicked => { CondPick.clear(); }
+                }
+            }
+
+            // 条件表
+            Rectangle {
+                vertical-stretch: 1;
+                min-height: 74px;
+                preferred-height: min(CondPick.list-height + 8px, 440px);
+                border-radius: 5px;
+                border-width: 1px;
+                border-color: Theme.border;
+                background: Theme.surface-alt;
+
+                ScrollView {
+                    VerticalLayout {
+                        padding: 4px;
+                        spacing: 4px;
+
+                        if CondPick.rows.length == 0: Rectangle {
+                            height: 66px;
+                            Text {
+                                text: "还没有条件：所有行都留着。点上面“+ 条件”加一个";
+                                color: Theme.text-faint;
+                                font-size: 12px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                        for r in CondPick.rows: RowView { item: r; }
+                    }
+                }
+            }
+
+            if CondPick.note != "": Text {
+                text: "⚠ " + CondPick.note;
+                color: Theme.warn;
+                font-size: 11.5px;
+                wrap: word-wrap;
+            }
+
+            Text {
+                text: CondPick.summary;
+                color: Theme.text-muted;
+                font-size: 11.5px;
+                wrap: word-wrap;
+            }
+            Text {
+                text: CondPick.preview;
+                color: Theme.text-faint;
+                font-family: "Consolas";
+                font-size: 11px;
+                wrap: word-wrap;
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                Rectangle { horizontal-stretch: 1; }
+                Button {
+                    text: "取消";
+                    clicked => { CondPick.cancel(); }
+                }
+                Button {
+                    text: "确定";
+                    primary: true;
+                    clicked => { CondPick.accept(); }
+                }
+            }
+        }
+    }
+
+    // 右下角：拽着改大小（拽过一次就一直记得）
+    Rectangle {
+        x: root.width - self.width - 2px;
+        y: root.height - self.height - 2px;
+        width: 14px;
+        height: 14px;
+        grip := TouchArea {
+            mouse-cursor: nwse-resize;
+            moved => {
+                if (self.pressed) {
+                    CondPick.box-w = max(460px, root.width + (self.mouse-x - self.pressed-x));
+                    CondPick.box-h = max(320px, root.height + (self.mouse-y - self.pressed-y));
+                }
+            }
+        }
+        Path {
+            width: 10px;
+            height: 10px;
+            x: 2px;
+            y: 2px;
+            viewbox-width: 16;
+            viewbox-height: 16;
+            commands: "M14 2 L2 14 M14 8 L8 14";
+            stroke: Theme.border-strong;
+            stroke-width: 1.5px;
+            fill: transparent;
+        }
+    }
+}

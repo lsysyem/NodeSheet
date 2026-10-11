@@ -321,6 +321,8 @@ pub(crate) fn push_graph(app: &AppWindow, st: &App, with_params: bool) {
                         let value = match wired {
                             Some(up) => format!("← {}", up.title),
                             None if button => p.label.clone(),
+                            // 筛选条件：这一行写条件的一句话（点旁边的“编辑”打开条件编辑器）
+                            None if p.kind == ParamKind::Conditions => cond::summary(value),
                             None => value.clone(),
                         };
                         ParamItem {
@@ -337,6 +339,7 @@ pub(crate) fn push_graph(app: &AppWindow, st: &App, with_params: bool) {
                                 ParamKind::File | ParamKind::SaveFile => 4,
                                 ParamKind::Button => 6,
                                 ParamKind::Dtype => 8,
+                                ParamKind::Conditions => 9,
                                 _ => 0,
                             },
                             options: ModelRc::new(VecModel::from(options)),

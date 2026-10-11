@@ -51,6 +51,8 @@ pub enum ParamKind {
     Dict,
     /// 关键字参数 `n_rows=10, low_memory=True`，得到字典
     Kwargs,
+    /// 筛选条件（界面搭的条件树，存成 JSON 文字）：得到 polars 表达式，一条都没有时是 None（见 cond.rs）
+    Conditions,
     /// 多行代码，原样传（字符串）
     Code,
     /// 按钮：点了以后节点的代码带着 `action == 参数名` 执行一次（不走缓存）
@@ -70,6 +72,7 @@ pub const PARAM_KINDS: &[(ParamKind, &str, &str)] = &[
     (ParamKind::Dtype, "dtype", "数据类型"),
     (ParamKind::Dict, "dict", "键值对"),
     (ParamKind::Kwargs, "kwargs", "关键字参数"),
+    (ParamKind::Conditions, "conditions", "筛选条件"),
     (ParamKind::File, "file", "文件（读）"),
     (ParamKind::SaveFile, "save_file", "文件（写）"),
     (ParamKind::Sheet, "sheet", "Excel 的 sheet"),

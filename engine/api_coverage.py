@@ -57,7 +57,7 @@ RULES = [
     # ---------------- DataFrame ----------------
     ("DataFrame.group_by_dynamic", HAVE, "`expr` 节点：上下文 group_by，分组后 agg，填“时间窗口”"),
     ("DataFrame.rolling", HAVE, "`expr` 节点：上下文 group_by，分组后 agg，填“滚动窗口”"),
-    ("DataFrame.remove", HAVE, "`expr` 节点：上下文 filter，打开 remove"),
+    ("DataFrame.remove", HAVE, "`filter` 节点（方式“去掉满足的”）、`expr` 节点（上下文 filter，打开 remove）"),
     ("DataFrame.match_to_schema", HAVE, "`cast_columns` 节点（方式 match_to_schema）"),
     ("DataFrame.write_ndjson", HAVE, "`write` 节点（JSON，打开 ndjson 或扩展名 .ndjson / .jsonl）"),
     ("DataFrame.limit", ALT, "就是 head：`slice` 节点（取法 head）"),

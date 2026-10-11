@@ -93,6 +93,28 @@ export struct KindItem {
     cat: int,
 }
 
+// 筛选条件编辑器里的一行：条件一行，分组占一行（组里的条件缩进在它下面），见 src/cond.rs
+export struct CondRow {
+    kind: int,          // 0 条件 / 1 分组
+    depth: int,         // 缩进层数（分组套了几层）
+    index: int,         // 在 rows 里的下标（回调里报这个）
+    join: int,          // 和上一个的关系：0 且 / 1 或
+    first: bool,        // 这一组里的第一项（不显示“且 / 或”）
+    group-join: int,    // 分组：组里的关系 0 且 / 1 或
+    count: string,      // 分组：这一组有几项
+    col: string,        // 条件：列名
+    col-index: int,     // 列名在 CondPick.col-names 里的下标（-1 = 不在列表里）
+    op-options: [string],
+    op: int,
+    value: string,
+    value-hint: string,
+    value-options: [string], // 值的类型是真假时：真 / 假（下拉）；空 = 用输入框
+    value-index: int,
+    valueless: bool,    // 不用填值（为空 / 为真…）
+    type-options: [string],  // 值按什么类型填：文字 / 数字 / 日期…（这一列合得来的）
+    type-index: int,    // 值类型在这一行的 type-options 里的下标（它决定上面能选哪些操作）
+}
+
 // 帮助窗口里的一行（见 src/help.rs）
 export struct HelpBlock {
     kind: int,     // 0 段落 / 1 节标题（参数、输入…）/ 2 小标题 / 3 列表项 / 4 代码 / 5 参数条目 / 6 相关节点（可点）/ 7 这个节点的情况 / 8 淡色小字
@@ -202,6 +224,7 @@ export global Icons {
     out property <string> help: "M12 3.5 A8.5 8.5 0 1 0 12 20.5 A8.5 8.5 0 1 0 12 3.5 Z M9.6 9.6 A2.5 2.5 0 1 1 13.2 11.8 C12.4 12.2 12 12.8 12 13.6 V14.2 M12 16.9 V17.3";
     out property <string> back: "M15 6 L9 12 L15 18";
     out property <string> folder: "M3.5 6.5 A1 1 0 0 1 4.5 5.5 H9.5 L11.5 8 H19.5 A1 1 0 0 1 20.5 9 V17.5 A1 1 0 0 1 19.5 18.5 H4.5 A1 1 0 0 1 3.5 17.5 Z";
+    out property <string> filter: "M4 5 H20 L14 12.5 V19 L10 17 V12.5 Z";
 
     // 节点分类的图标：IO / 行 / 列 / 表达式 / 统计 / 变形 / 多表 / 代码
     pure public function cat(i: int) -> string {

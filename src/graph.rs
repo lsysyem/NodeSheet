@@ -5,6 +5,7 @@
 //! 里面的节点各算出一个 polars 表达式，从左往右连；输出节点（列 / 键 / 条件 / 排序）的值交给 expr 节点的上下文。
 //! group_by 按在哪里算分成三张网络（`Env`）：分组键（整表上算）、聚合、筛选组（都在每组里算）。
 
+use crate::cond;
 use crate::nodes::{self, NodeType, ParamKind, Source, py_str};
 use serde_json::{Map, Value, json};
 use std::path::Path;
@@ -341,6 +342,13 @@ impl Node {
                 ParamKind::Code => {
                     let line = value.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with('#'));
                     parts.extend(line.map(String::from));
+                }
+                // 筛选条件：写下条件是什么样（没条件的就什么也不写）
+                ParamKind::Conditions => {
+                    let text = cond::summary(value);
+                    if !text.is_empty() {
+                        parts.push(text);
+                    }
                 }
                 // 没动过的可选参数不占地方
                 _ if !p.required && value == p.default => {}

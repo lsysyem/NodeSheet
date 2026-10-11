@@ -72,6 +72,111 @@ class SubError(Exception):
         self.msg = msg
 
 
+# ---- 筛选节点（filter）的条件：界面搭出来的条件树（JSON）→ polars 表达式。
+# JSON：{"join": "and" | "or", "items": [条件或分组…]}，分组是同样形状、带 items 的项，
+# 条件是 {"col", "op", "value", "type"?}（value 是界面里填的文字，type 是值的类型，不写按文字算）。
+
+
+def cond_lit(pl, text, kind):
+    """条件里的值 → 字面量：数字 / 真假 / 日期 / 时间 / 日期时间 / 文字。"""
+    text = text.strip()
+    if kind == "number":
+        try:
+            return int(text)
+        except ValueError:
+            return float(text)  # 不是整数时让 polars 去报；空值不在这里管
+    if kind == "bool":
+        return text.lower() in ("true", "1", "yes", "是", "真")
+    if kind == "date":
+        return pl.lit(text).str.to_date()
+    if kind == "time":
+        return pl.lit(text).str.to_time()
+    if kind == "datetime":
+        return pl.lit(text).str.to_datetime()
+    return text
+
+
+def cond_values(pl, c, count=None):
+    """条件里的值：是其中一个 → 一串；介于 → 两个（都是逗号分开）。"""
+    text = c.get("value") or ""
+    kind = c.get("type") or "text"
+    parts = [p.strip() for p in text.split(",") if p.strip()]
+    if not parts:
+        raise ValueError("有一个条件还没填值")
+    if count is not None and len(parts) != count:
+        raise ValueError(f"“{text}”要填 {count} 个值，用逗号分开")
+    return [cond_lit(pl, p, kind) for p in parts]
+
+
+def cond_test(pl, c):
+    """一个条件 → 真假表达式。"""
+    name = (c.get("col") or "").strip()
+    if not name:
+        raise ValueError("有一个条件还没选列")
+    col = pl.col(name)
+    op = c.get("op") or "eq"
+    if op == "is_null":
+        return col.is_null()
+    if op == "not_null":
+        return col.is_not_null()
+    if op == "is_true":
+        return col == True
+    if op == "is_false":
+        return col == False
+    text = c.get("value") or ""
+    if op == "contains":
+        return col.str.contains(text, literal=True)
+    if op == "ncontains":
+        return ~col.str.contains(text, literal=True)
+    if op == "starts":
+        return col.str.starts_with(text)
+    if op == "ends":
+        return col.str.ends_with(text)
+    if op == "regex":
+        return col.str.contains(text)
+    if op == "in":
+        return col.is_in(cond_values(pl, c))
+    if op == "between":
+        low, high = cond_values(pl, c, 2)
+        return col.is_between(low, high)
+    value = cond_lit(pl, text, c.get("type") or "text")
+    compare = {"eq": col == value, "ne": col != value, "gt": col > value,
+               "ge": col >= value, "lt": col < value, "le": col <= value}
+    if op not in compare:
+        raise ValueError(f"不认识的操作 {op}")
+    return compare[op]
+
+
+def cond_group(pl, group):
+    """一组条件：按 join 合起来（or 用 pl.any_horizontal，和 expr 节点的“任一满足”一致）。"""
+    exprs = [e for e in (cond_item(pl, it) for it in group.get("items") or []) if e is not None]
+    if not exprs:
+        return None
+    if len(exprs) == 1:
+        return exprs[0]
+    if group.get("join") == "or":
+        return pl.any_horizontal(exprs)
+    import functools
+    import operator
+
+    return functools.reduce(operator.and_, exprs)
+
+
+def cond_item(pl, item):
+    """条件树里的一项：有 items 的是分组。"""
+    return cond_group(pl, item) if "items" in item else cond_test(pl, item)
+
+
+def cond_expr(pl, raw):
+    """筛选节点的条件（JSON 文字）→ 表达式；没有条件时 None（所有行都留着）。"""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    import json
+
+    return cond_group(pl, json.loads(text))
+
+
 def convert(kind, raw, env):
     """参数填的内容（字符串）→ ch() 返回的值。留空：数字 / 表达式是 None，列表 / 字典是空的。"""
     text = raw.strip()
@@ -93,6 +198,9 @@ def convert(kind, raw, env):
         return eval("dict(" + text + "\n)", env) if text else {}
     if kind == "dtype":
         return eval(text, dtype_env(env)) if text else None
+    if kind == "conditions":
+        # 筛选节点：界面搭的条件树 → 表达式（没有 polars 的环境里也能算出这份 JSON 的形状）
+        return cond_expr(env.get("pl") or __import__("polars"), raw)
     return text  # text / menu / file / save_file / sheet
 
 

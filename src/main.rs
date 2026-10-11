@@ -5,13 +5,14 @@
 //! - 节点：`nodes`（节点类型的定义和注册表）、`graph`（节点图的结构）、`engine`（Python + polars 子进程）
 //! - 界面胶水：`view`（表格）、`selection`（选择 / 复制）、`files`（打开文件、重新加载、拖放）、`project`（工程文件）、
 //!   `panel`（节点面板）、`type_editor`（节点类型 / 参数界面编辑器）、`run`（执行节点图）、`complete`（代码编辑辅助）、
-//!   `help`（节点的帮助窗口）、`undo`（撤销 / 重做、改过了没存）、`settings`（个人设置、最近打开）、
-//!   `quick`（表格右键菜单建节点）
+//!   `help`（节点的帮助窗口）、`pick`（选列框 / 范围编辑器）、`cond`（筛选条件编辑器）、`undo`（撤销 / 重做、改过了没存）、
+//!   `settings`（个人设置、最近打开）、`quick`（表格右键菜单建节点）
 //!
 //! 界面胶水的模块都 `use crate::*`，互相直接调用；状态集中在 `App`。
 
 mod clipboard;
 mod complete;
+mod cond;
 mod convert;
 mod engine;
 mod files;
@@ -103,6 +104,8 @@ struct App {
     pick: Option<pick::PickState>,
     /// “按位置”参数的范围编辑器（pick.rs）
     ranges: Option<pick::RangeState>,
+    /// 开着的筛选条件编辑器（筛选节点的“筛选条件”参数，cond.rs）
+    cond: Option<cond::CondState>,
     /// Tab 菜单当前列出的搜索结果
     search_hits: Vec<nodes::Hit>,
     /// Tab 菜单里写的是一段表达式：第一项是“按文字建节点”，建的就是它
@@ -463,6 +466,7 @@ fn main() {
     type_editor::install(&app, &state);
     help::install(&app, &state);
     pick::install(&app, &state);
+    cond::install(&app, &state);
 
     // 事件过滤器要在事件循环启动后注册（文件拖放走 winit 的 OLE 事件）
     {

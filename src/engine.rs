@@ -1220,6 +1220,24 @@ out = frame.select(ch("cols")).rename(ch("names")).with_row_index(**ch("opts")).
         c.g.node_mut(other).unwrap().set("code", "df.select(j=pl.col(\"i\"), k2=pl.col(\"k\"), m=pl.col(\"n\")).sort(\"j\")");
 
         // ---- 行
+        // 筛选节点：条件是界面搭的条件树（JSON），引擎把它变成表达式；留下的行数照着算一遍
+        let cond = r#"{"items":[{"col":"k","op":"contains","value":"a"},{"col":"i","op":"gt","value":"2","type":"number"}],"join":"and"}"#;
+        let kept = c.add(all, all, "filter", &[("conditions", cond)]);
+        assert_eq!(c.run(kept, "filter 留下满足的").map(|ok| ok.rows), Ok(1));
+        let removed = c.add(all, all, "filter", &[("keep", "去掉满足的"), ("conditions", cond)]);
+        assert_eq!(c.run(removed, "filter 去掉满足的").map(|ok| ok.rows), Ok(3));
+        // 一条条件都没有：什么都不筛
+        let none = c.add(all, all, "filter", &[("conditions", "")]);
+        assert_eq!(c.run(none, "filter 没有条件").map(|ok| ok.rows), Ok(4));
+        // 分组（或）、介于、是其中之一、为空、正则、日期时间、分类列
+        let many = r#"{"join":"or","items":[{"col":"k","op":"starts","value":"b"},
+            {"join":"and","items":[{"col":"s","op":"contains","value":"1"},{"col":"n","op":"between","value":"2, 4","type":"number"}]},
+            {"col":"i","op":"in","value":"4, 1","type":"number"},{"col":"t","op":"is_null"},
+            {"col":"ts","op":"ge","value":"2024-01-01 00:00:00","type":"datetime"},
+            {"col":"k","op":"ends","value":"a"},{"col":"k","op":"regex","value":"^a"},
+            {"col":"c","op":"in","value":"a"},{"col":"l","op":"not_null"}]}"#;
+        let mixed = c.add(all, all, "filter", &[("conditions", many)]);
+        assert_eq!(c.run(mixed, "filter 各种操作").map(|ok| ok.rows), Ok(4));
         c.case(all, all, "unique", &[]);
         c.case(all, all, "unique", &[("subset", "\"k\""), ("keep", "first")]);
         let dup = c.add(all, all, "unique", &[("mode", "is_duplicated"), ("subset", "\"k\"")]);
