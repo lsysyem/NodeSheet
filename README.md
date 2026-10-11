@@ -24,7 +24,8 @@
 
 系统要求：Windows 10 / 11 64 位。
 
-- 用打包脚本自行打包：
+- **直接下载**：到 [Releases](https://github.com/lsysyem/NodeSheet/releases/latest) 下载 `NodeSheet-vX.Y.Z-win64.zip`，解压到任意位置，双击 `NodeSheet.exe` 运行
+- 或用打包脚本自行打包：
 
   ```powershell
   pwsh .\package.ps1     # 产出 dist\NodeSheet\ 文件夹和 zip
