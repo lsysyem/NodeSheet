@@ -739,9 +739,11 @@ export global RangePick {
     in-out property <bool> open;
     in-out property <length> anchor-x;
     in-out property <length> anchor-y;
-    // 拖过之后的位置（x/y = 0 表示没拖过，贴着按钮开）
+    // 拖过之后的位置（x/y = 0 表示没拖过，贴着按钮开）；大小拽过一次就一直记得（w/h = 0 = 没拽过）
     in-out property <length> box-x;
     in-out property <length> box-y;
+    in-out property <length> box-w;
+    in-out property <length> box-h;
     in property <string> title;
     in property <[string]> columns;  // 上游的列（下拉选；空 = 还没算出来，直接填序号）
     in property <[RangeRow]> rows;
@@ -814,8 +816,8 @@ export component RangePopup inherits Card {
     in property <length> avail-w;
     in property <length> avail-h;
 
-    width: min(560px, root.avail-w - 16px);
-    height: min(lay.preferred-height, root.avail-h - 16px);
+    width: RangePick.box-w > 0px ? min(RangePick.box-w, root.avail-w - 16px) : min(560px, root.avail-w - 16px);
+    height: RangePick.box-h > 0px ? min(RangePick.box-h, root.avail-h - 16px) : min(lay.preferred-height, root.avail-h - 16px);
     x: max(8px, min(RangePick.box-x > 0px ? RangePick.box-x : RangePick.anchor-x - self.width, root.avail-w - self.width - 8px));
     y: max(8px, min(RangePick.box-y > 0px ? RangePick.box-y : RangePick.anchor-y + 4px, root.avail-h - self.height - 8px));
 
@@ -982,6 +984,34 @@ export component RangePopup inherits Card {
                     clicked => { RangePick.accept(); }
                 }
             }
+        }
+    }
+
+    // 右下角：拽大小（记得住）
+    Rectangle {
+        x: root.width - self.width - 2px;
+        y: root.height - self.height - 2px;
+        width: 14px;
+        height: 14px;
+        grip := TouchArea {
+            mouse-cursor: nwse-resize;
+            moved => {
+                if (self.pressed) {
+                    RangePick.box-w = max(460px, root.width + (self.mouse-x - self.pressed-x));
+                    RangePick.box-h = max(240px, root.height + (self.mouse-y - self.pressed-y));
+                }
+            }
+        }
+        Path {
+            width: 10px;
+            height: 10px;
+            x: 2px; y: 2px;
+            viewbox-width: 16;
+            viewbox-height: 16;
+            commands: "M14 2 L2 14 M14 8 L8 14";
+            stroke: Theme.border-strong;
+            stroke-width: 1.5px;
+            fill: transparent;
         }
     }
 }
