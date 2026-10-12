@@ -1307,18 +1307,43 @@ out = frame.select(ch("cols")).rename(ch("names")).with_row_index(**ch("opts")).
         c.failed.pop();
         c.case(all, all, "with_row_index", &[("name", "行"), ("offset", "1")]);
         // 增加列：界面选常用函数，每种方式一例
-        c.case(all, all, "add_column", &[("name", "前两字"), ("col", "\"s\""), ("func_text", "前 N 字符"), ("n", "2")]);
-        c.case(all, all, "add_column", &[("name", "型号"), ("col", "\"s\""), ("func_text", "取第 N 段"), ("delim", "\" \"")]);
-        c.case(all, all, "add_column", &[("name", "整"), ("col", "\"s\""), ("func_text", "拼接"), ("cols2", "\"s\", \"k\""), ("sep2", "-")]);
+        c.case(all, all, "add_column", &[("mode", "文本"), ("name", "前两字"), ("col", "\"s\""), ("func_text", "前 N 字符"), ("n", "2")]);
+        c.case(all, all, "add_column", &[("mode", "文本"), ("name", "型号"), ("col", "\"s\""), ("func_text", "取第 N 段"), ("delim", "\" \"")]);
+        c.case(all, all, "add_column", &[("mode", "文本"), ("name", "整"), ("col", "\"s\""), ("func_text", "拼接"), ("cols2", "\"s\", \"k\""), ("sep2", "-")]);
+        c.case(all, all, "add_column", &[("mode", "文本"), ("name", "号"), ("col", "\"s\""), ("func_text", "替换"), ("find", "\\d"), ("repl", "#"), ("replace_all", "True"), ("regex", "True")]);
+        c.case(all, all, "add_column", &[("mode", "文本"), ("name", "素"), ("col", "\"s\""), ("func_text", "去首尾空白"), ("chars", " ")]);
+        c.case(all, all, "add_column", &[("mode", "文本"), ("name", "倒"), ("col", "\"s\""), ("func_text", "反转")]);
+        c.case(all, all, "add_column", &[("mode", "文本"), ("name", "遍"), ("col", "\"s\""), ("func_text", "重复"), ("times", "2")]);
+        c.case(all, all, "add_column", &[("mode", "文本"), ("name", "回"), ("col", "\"s\""), ("func_text", "出现次数"), ("find", "x")]);
+        c.case(all, all, "add_column", &[("mode", "文本"), ("name", "有数"), ("col", "\"s\""), ("func_text", "提取全部"), ("pattern", "\\d")]);
+        c.case(all, all, "add_column", &[("mode", "文本"), ("name", "拆"), ("col", "\"s\""), ("func_text", "拆成列表"), ("delim", " ")]);
         c.case(all, all, "add_column", &[("mode", "数学"), ("name", "整十"), ("col", "\"n\""), ("func_math", "四舍五入"), ("decimals", "0")]);
         c.case(all, all, "add_column", &[("mode", "数学"), ("name", "倍数"), ("col", "\"n\""), ("func_math", "两列运算"), ("op", "*"), ("other", "pl.col(\"i\")")]);
+        c.case(all, all, "add_column", &[("mode", "数学"), ("name", "立方"), ("col", "\"n\""), ("func_math", "立方根")]);
+        c.case(all, all, "add_column", &[("mode", "数学"), ("name", "指数"), ("col", "\"n\""), ("func_math", "自然指数")]);
+        c.case(all, all, "add_column", &[("mode", "数学"), ("name", "号"), ("col", "\"n\""), ("func_math", "符号")]);
+        c.case(all, all, "add_column", &[("mode", "数学"), ("name", "压"), ("col", "\"n\""), ("func_math", "限制范围"), ("lo", "0"), ("hi", "2")]);
+        c.case(all, all, "add_column", &[("mode", "数学"), ("name", "弦"), ("col", "\"n\""), ("func_math", "正弦")]);
+        c.case(all, all, "add_column", &[("mode", "数学"), ("name", "累计"), ("col", "\"i\""), ("func_math", "累计和")]);
+        c.case(all, all, "add_column", &[("mode", "数学"), ("name", "名次"), ("col", "\"i\""), ("func_math", "排名"), ("rank_method", "min")]);
+        c.case(all, all, "add_column", &[("mode", "数学"), ("name", "差"), ("col", "\"i\""), ("func_math", "差分")]);
+        c.case(all, all, "add_column", &[("mode", "数学"), ("name", "合计"), ("col", "\"i\""), ("func_math", "全列求和")]);
         c.case(all, all, "add_column", &[("mode", "日期"), ("name", "年"), ("col", "\"ts\""), ("func_date", "取年")]);
         c.case(all, all, "add_column", &[("mode", "日期"), ("name", "到货"), ("col", "\"ts\""), ("func_date", "加减时间"), ("delta", "3"), ("dunit", "天")]);
         c.case(all, all, "add_column", &[("mode", "日期"), ("name", "月初"), ("col", "\"ts\""), ("func_date", "截断到"), ("trunc", "月")]);
+        c.case(all, all, "add_column", &[("mode", "日期"), ("name", "钟点"), ("col", "\"ts\""), ("func_date", "转成时间")]);
+        c.case(all, all, "add_column", &[("mode", "日期"), ("name", "东八"), ("col", "\"ts\""), ("func_date", "时区转换"), ("tz", "Asia/Shanghai")]);
+        c.case(all, all, "add_column", &[("mode", "日期"), ("name", "隔"), ("col", "\"ts\""), ("func_date", "相隔"), ("col2", "\"ts\""), ("span_unit", "天")]);
+        // 时长列换算：code 造一列时长，再做时长转
+        let dur = c.g.add(&kind("code"));
+        c.g.node_mut(dur).unwrap().set("code", "df.select(pl.duration(days=pl.col(\"i\"), hours=2).alias(\"d\"))");
+        c.case(dur, dur, "add_column", &[("mode", "日期"), ("name", "时数"), ("col", "\"d\""), ("func_date", "时长转"), ("span_unit", "时")]);
         c.case(all, all, "add_column", &[("mode", "条件"), ("name", "大小"), ("col", "\"i\""), ("cmp", "大于"), ("value", "2"), ("then_v", "\"大\""), ("else_v", "\"小\"")]);
         c.case(all, all, "add_column", &[("mode", "值"), ("name", "序"), ("func_val", "行号")]);
         c.case(all, all, "add_column", &[("mode", "值"), ("name", "复"), ("func_val", "复制列"), ("copy", "\"k\"")]);
         c.case(all, all, "add_column", &[("mode", "值"), ("name", "常"), ("func_val", "常量"), ("lit", "0")]);
+        c.case(all, all, "add_column", &[("mode", "值"), ("name", "今"), ("func_val", "今天")]);
+        c.case(all, all, "add_column", &[("mode", "值"), ("name", "刻"), ("func_val", "现在")]);
         // ---- 表达式：每种上下文
         expr_contexts(&mut c, all, plain);
         // ---- 统计

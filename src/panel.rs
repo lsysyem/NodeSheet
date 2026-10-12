@@ -1160,7 +1160,10 @@ pub(crate) fn install_graph_callbacks(app: &AppWindow, state: &Arc<Mutex<App>>) 
                 // “方式”换了，显示哪些参数也跟着变
                 is_tabs = def.mode;
                 // 类型：旁边的输入框换成新的写法
-                rebuild = is_tabs || def.kind == ParamKind::Dtype;
+                // 有参数的显示条件跟着这个菜单走（如 add_column 的“函数”），显隐也要变，一并重建
+                rebuild = is_tabs
+                    || def.kind == ParamKind::Dtype
+                    || node.kind().params.iter().any(|p| p.show.iter().any(|(k, _)| k == &def.name));
                 let is_context = node.kind.network && (def.name == "context" || def.name == "then");
                 if is_sheet && option == 0 {
                     picked.clear();
