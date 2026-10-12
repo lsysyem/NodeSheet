@@ -1306,6 +1306,19 @@ out = frame.select(ch("cols")).rename(ch("names")).with_row_index(**ch("opts")).
         assert!(c.run(strict, "match_to_schema 默认").is_err(), "缺列、多列默认要报错");
         c.failed.pop();
         c.case(all, all, "with_row_index", &[("name", "行"), ("offset", "1")]);
+        // 增加列：界面选常用函数，每种方式一例
+        c.case(all, all, "add_column", &[("name", "前两字"), ("col", "\"s\""), ("func_text", "前 N 字符"), ("n", "2")]);
+        c.case(all, all, "add_column", &[("name", "型号"), ("col", "\"s\""), ("func_text", "取第 N 段"), ("delim", "\" \"")]);
+        c.case(all, all, "add_column", &[("name", "整"), ("col", "\"s\""), ("func_text", "拼接"), ("cols2", "\"s\", \"k\""), ("sep2", "-")]);
+        c.case(all, all, "add_column", &[("mode", "数学"), ("name", "整十"), ("col", "\"n\""), ("func_math", "四舍五入"), ("decimals", "0")]);
+        c.case(all, all, "add_column", &[("mode", "数学"), ("name", "倍数"), ("col", "\"n\""), ("func_math", "两列运算"), ("op", "*"), ("other", "pl.col(\"i\")")]);
+        c.case(all, all, "add_column", &[("mode", "日期"), ("name", "年"), ("col", "\"ts\""), ("func_date", "取年")]);
+        c.case(all, all, "add_column", &[("mode", "日期"), ("name", "到货"), ("col", "\"ts\""), ("func_date", "加减时间"), ("delta", "3"), ("dunit", "天")]);
+        c.case(all, all, "add_column", &[("mode", "日期"), ("name", "月初"), ("col", "\"ts\""), ("func_date", "截断到"), ("trunc", "月")]);
+        c.case(all, all, "add_column", &[("mode", "条件"), ("name", "大小"), ("col", "\"i\""), ("cmp", "大于"), ("value", "2"), ("then_v", "\"大\""), ("else_v", "\"小\"")]);
+        c.case(all, all, "add_column", &[("mode", "值"), ("name", "序"), ("func_val", "行号")]);
+        c.case(all, all, "add_column", &[("mode", "值"), ("name", "复"), ("func_val", "复制列"), ("copy", "\"k\"")]);
+        c.case(all, all, "add_column", &[("mode", "值"), ("name", "常"), ("func_val", "常量"), ("lit", "0")]);
         // ---- 表达式：每种上下文
         expr_contexts(&mut c, all, plain);
         // ---- 统计
