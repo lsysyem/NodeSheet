@@ -369,7 +369,7 @@ def catalog(pl):
                 except Exception:
                     sig = "(...)"
                 doc = (inspect.getdoc(m) or "").strip().split("\n")[0]
-            out.append([name, sig[:200], doc[:200]])
+            out.append([name, sig[:1500], doc[:200]])
         return out
 
     lf = pl.LazyFrame({"a": [1]})

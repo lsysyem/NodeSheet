@@ -198,6 +198,14 @@ pub struct Found {
 
 const NAMESPACES: &[&str] = &["str", "dt", "list", "arr", "cat", "struct", "map", "name", "bin"];
 
+/// 参数是文件路径的函数：代码节点里它们的字符串参数补全文件路径。
+const PATH_FNS: &[&str] = &[
+    "open", "read_csv", "scan_csv", "read_excel", "read_parquet", "scan_parquet", "read_ipc", "scan_ipc",
+    "read_ipc_stream", "read_json", "scan_ndjson", "read_ndjson", "read_avro", "scan_lines", "read_delta",
+    "sink_parquet", "sink_csv", "sink_ipc", "sink_ndjson", "write_csv", "write_excel", "write_parquet",
+    "write_json", "write_ipc", "write_avro",
+];
+
 /// 常用的排前面（其余按字母序）。
 const COMMON: &[&str] = &[
     "col", "filter", "select", "with_columns", "group_by", "agg", "sort", "join", "alias", "sum", "mean", "len",
@@ -336,8 +344,177 @@ fn rank(candidates: Vec<(String, String, String)>, prefix: &str, keep_order: boo
     if items.len() == 1 && items[0].label == prefix { Vec::new() } else { items }
 }
 
-/// 光标处的补全。columns 是输入表的列名（在引号里时补全）。
-pub fn complete(text: &str, cursor: usize, columns: &[String], sql: bool) -> Found {
+/// 头部以一次调用结尾时被调的名字：`pl.read_csv(` → read_csv，不是调用则空。
+fn callee_of(head: &str) -> &str {
+    let head = head.trim_end();
+    if !head.ends_with('(') {
+        return "";
+    }
+    let h = head[..head.len() - 1].trim_end();
+    &h[h.len() - ident_len_back(h)..]
+}
+
+/// dir 下和 prefix 开头匹配的条目：文件夹在前、按名字排，最多 100 个。文件夹的名字带分隔符（选中后接着往里列）。
+fn path_items(dir: &str, prefix: &str) -> Vec<Item> {
+    let lower = prefix.to_lowercase();
+    let sep = if dir.contains('/') { '/' } else { '\\' };
+    let mut dirs: Vec<Item> = Vec::new();
+    let mut files: Vec<Item> = Vec::new();
+    let Ok(read) = std::fs::read_dir(dir) else { return Vec::new() };
+    for entry in read.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.to_lowercase().starts_with(&lower) {
+            continue;
+        }
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            dirs.push(Item { label: format!("{name}{sep}"), detail: String::from("文件夹"), doc: String::new() });
+        } else {
+            files.push(Item { label: name, detail: String::from("文件"), doc: String::new() });
+        }
+        if dirs.len() + files.len() >= 200 {
+            break;
+        }
+    }
+    let by_name = |a: &Item, b: &Item| a.label.to_lowercase().cmp(&b.label.to_lowercase());
+    dirs.sort_by(by_name);
+    files.sort_by(by_name);
+    let mut items = dirs;
+    items.extend(files);
+    items.truncate(100);
+    items
+}
+
+/// 光标所在的未闭合调用：(开括号位置, 被调的名字)。
+fn enclosing_call(text: &str, cursor: usize) -> Option<(usize, &str)> {
+    let b = text.as_bytes();
+    let mut depth = 0usize;
+    let mut open = None;
+    for i in (cursor.saturating_sub(4000)..cursor).rev() {
+        match b[i] {
+            b')' | b']' | b'}' => depth += 1,
+            b'(' | b'[' | b'{' if depth > 0 => depth -= 1,
+            b'(' => {
+                open = Some(i);
+                break;
+            }
+            b'[' | b'{' => break,
+            _ => {}
+        }
+    }
+    let open = open?;
+    let head = &text[..open];
+    let name = &head[head.len() - ident_len_back(head)..];
+    Some((open, name))
+}
+
+/// 调用里已经写了的关键字参数（depth 0 的 名字=；== / >= / != 不算）。
+fn used_kwargs(call: &str) -> Vec<String> {
+    let b = call.as_bytes();
+    let mut used = Vec::new();
+    let mut depth = 0i32;
+    for (i, &c) in b.iter().enumerate() {
+        match c {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'=' if depth == 0 && b.get(i + 1) != Some(&b'=') => {
+                let mut j = i;
+                while j > 0 && b[j - 1].is_ascii_whitespace() {
+                    j -= 1;
+                }
+                let len = ident_len_back(&call[..j]);
+                if len > 0 {
+                    used.push(call[j - len..j].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    used
+}
+
+fn push_kwarg(part: &str, out: &mut Vec<(String, String)>) {
+    let p = part.trim();
+    if p.is_empty() || p == "self" || p == "*" || p == "/" || p.starts_with('*') {
+        return;
+    }
+    let (name, default) = match p.split_once('=') {
+        Some((n, d)) => (n.trim(), d.trim()),
+        None => (p, ""),
+    };
+    if name.is_empty() || !name.chars().next().is_some_and(|c| is_ident(c)) {
+        return;
+    }
+    let detail = if default.is_empty() {
+        String::from("必填")
+    } else {
+        let mut d: String = default.chars().take(40).collect();
+        if default.chars().count() > 40 {
+            d.push('…');
+        }
+        d
+    };
+    out.push((name.to_string(), detail));
+}
+
+/// 签名里的参数：`(source, *, encoding='utf8')` → [("source", "必填"), ("encoding", "'utf8'")]。
+/// self、单独的 * 和 /（位置标记）、*args / **kwargs 不算。
+fn kwargs_from_sig(sig: &str) -> Vec<(String, String)> {
+    let Some(inner) = sig.strip_prefix('(').and_then(|s| s.strip_suffix(')')) else { return Vec::new() };
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut part = String::new();
+    for c in inner.chars() {
+        match c {
+            '(' | '[' | '{' => {
+                depth += 1;
+                part.push(c);
+            }
+            ')' | ']' | '}' => {
+                depth -= 1;
+                part.push(c);
+            }
+            ',' if depth == 0 => {
+                push_kwarg(&part, &mut out);
+                part.clear();
+            }
+            _ => part.push(c),
+        }
+    }
+    push_kwarg(&part, &mut out);
+    out
+}
+
+/// 光标处这次调用的关键字参数（去掉已经填了的），从清单里的签名拆出来。
+fn kwarg_items(text: &str, open: usize, name: &str, call: &str) -> Vec<Item> {
+    if name.is_empty() {
+        return Vec::new();
+    }
+    let head = &text[..open - name.len()];
+    let all = ["Expr", "LazyFrame", "DataFrame", "GroupBy", "pl"]
+        .into_iter()
+        .chain(NAMESPACES.iter().copied());
+    let groups: Vec<&'static str> = match head.strip_suffix('.') {
+        Some(recv) => receiver_groups(recv).into_iter().chain(all).collect(),
+        None => all.collect(),
+    };
+    let used = used_kwargs(call);
+    for g in groups {
+        for e in group(g) {
+            if e.name == name && !e.sig.is_empty() && e.sig != "(...)" {
+                return kwargs_from_sig(&e.sig)
+                    .into_iter()
+                    .filter(|(n, _)| !used.iter().any(|u| u == n))
+                    .map(|(n, d)| Item { label: format!("{n}="), detail: d, doc: String::new() })
+                    .collect();
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// 光标处的补全。columns 是输入表的列名、params 是这个节点定义的参数（都在引号里时补全）；
+/// fallback 是路径补全没有写目录时用的目录（当前打开的文件所在的）。
+pub fn complete(text: &str, cursor: usize, columns: &[String], params: &[Item], sql: bool, fallback: &str) -> Found {
     let cursor = clamp(text, cursor);
     let before = &text[..cursor];
     let none = Found { start: cursor, items: Vec::new() };
@@ -355,11 +532,25 @@ pub fn complete(text: &str, cursor: usize, columns: &[String], sql: bool) -> Fou
     if let Some(last) = tokenize(before, sql).last().filter(|s| s.end == cursor) {
         match last.kind {
             Tok::Str if last.open => {
-                // 引号里：列名。SQL 的单引号是字符串值，不补
+                // 引号里：ch 的参数名、路径函数的文件路径，其余补列名。SQL 的单引号是字符串值，不补
                 if sql && before[last.start..].starts_with('\'') {
                     return none;
                 }
                 let start = last.start + last.quote;
+                let inside = &before[start..];
+                match callee_of(&before[..last.start]) {
+                    "ch" => {
+                        let items = params.iter().map(|p| (p.label.clone(), p.detail.clone(), p.doc.clone())).collect();
+                        return Found { start, items: rank(items, inside, true) };
+                    }
+                    name if PATH_FNS.contains(&name) => {
+                        let sep = inside.rfind(['/', '\\']).map_or(0, |i| i + 1);
+                        let (dir, prefix) = inside.split_at(sep);
+                        let dir = if dir.is_empty() { fallback } else { dir };
+                        return Found { start: start + sep, items: path_items(dir, prefix) };
+                    }
+                    _ => {}
+                }
                 return Found { start, items: rank(column_items(false), &before[start..], true) };
             }
             Tok::Str | Tok::Comment | Tok::Number => return none,
@@ -370,6 +561,28 @@ pub fn complete(text: &str, cursor: usize, columns: &[String], sql: bool) -> Fou
     let start = cursor - ident_len_back(before);
     let prefix = &before[start..];
     let head = &before[..start];
+    // 调用的括号里：补这个函数的参数名。空前缀只在括号 / 逗号后面弹（= 后面是值，不弹）；
+    // 打了前缀就按前缀筛，一个都没筛中时退回普通补全
+    if !sql && !head.ends_with('.') && !prefix.starts_with(|c: char| c.is_ascii_digit()) {
+        if let Some((open, callee)) = enclosing_call(before, cursor) {
+            let after_arg =
+                prefix.is_empty() && { let prev = head.trim_end(); prev.ends_with('(') || prev.ends_with(',') };
+            if after_arg || !prefix.is_empty() {
+                let items = kwarg_items(before, open, callee, &before[open + 1..]);
+                // 刚打完 ( ：全是必填位置参数的（pl.col(name) 这类）不弹，等打了前缀再说
+                let auto = !items.iter().all(|i| i.detail == "必填");
+                if !items.is_empty() && (auto || !prefix.is_empty()) {
+                    if prefix.is_empty() {
+                        return Found { start: cursor, items };
+                    }
+                    let found = rank(items.into_iter().map(|i| (i.label, i.detail, i.doc)).collect(), prefix, true);
+                    if !found.is_empty() {
+                        return Found { start, items: found };
+                    }
+                }
+            }
+        }
+    }
     let candidates: Vec<(String, String, String)> = if let Some(recv) = head.strip_suffix('.') {
         if sql {
             return none;
@@ -394,6 +607,8 @@ pub fn complete(text: &str, cursor: usize, columns: &[String], sql: bool) -> Fou
             var("df4", "第 4 个输入"),
             var("out", "把结果赋给它"),
             var("pl", "polars"),
+            var("ch", "取这个节点的参数"),
+            var("inputs", "全部输入的列表"),
         ];
         list.extend(["print", "len", "range", "str", "int", "float", "list", "dict"].map(|n| var(n, "内置函数")));
         list.extend(PY_KEYWORDS.iter().map(|k| var(k, "关键字")));
@@ -426,29 +641,12 @@ pub fn press(text: &str, anchor: usize, cursor: usize, key: &str) -> (String, us
 /// 光标所在的那次调用的签名和说明（编辑框下面那一行提示）。
 pub fn hint(text: &str, cursor: usize) -> String {
     let cursor = clamp(text, cursor);
-    let b = text.as_bytes();
-    let mut depth = 0usize;
-    let mut open = None;
-    for i in (cursor.saturating_sub(4000)..cursor).rev() {
-        match b[i] {
-            b')' | b']' | b'}' => depth += 1,
-            b'(' | b'[' | b'{' if depth > 0 => depth -= 1,
-            b'(' => {
-                open = Some(i);
-                break;
-            }
-            b'[' | b'{' => break,
-            _ => {}
-        }
-    }
-    let Some(open) = open else { return String::new() };
-    let head = &text[..open];
-    let name = &head[head.len() - ident_len_back(head)..];
+    let Some((open, name)) = enclosing_call(text, cursor) else { return String::new() };
     if name.is_empty() {
         return String::new();
     }
-    let recv = &head[..head.len() - name.len()];
-    let Some(recv) = recv.strip_suffix('.') else { return String::new() };
+    let head = &text[..open - name.len()];
+    let Some(recv) = head.strip_suffix('.') else { return String::new() };
     let all = ["Expr", "LazyFrame", "DataFrame", "GroupBy", "pl"].into_iter().chain(NAMESPACES.iter().copied());
     let found = receiver_groups(recv).into_iter().chain(all).flat_map(group).find(|e| e.name == name);
     match found {
@@ -470,16 +668,28 @@ mod tests {
                 "LazyFrame": [["filter", "(*predicates)", "Filter rows"], ["group_by", "(*by)", ""], ["collect", "()", ""]],
                 "DataFrame": [["pivot", "(on)", ""], ["filter", "(*predicates)", "Filter rows"]],
                 "GroupBy": [["agg", "(*aggs)", "Aggregate"], ["len", "()", ""]],
-                "Expr": [["sum", "()", "Get sum"], ["alias", "(name)", ""], ["str", "", ""], ["is_in", "(other)", ""]],
+                "Expr": [["sum", "()", "Get sum"], ["alias", "(name)", ""], ["str", "", ""], ["is_in", "(other)", ""],
+                    ["read_csv", "(source, *, encoding='utf8', n_rows=0)", ""]],
                 "str": [["contains", "(pattern)", "Check"], ["len_chars", "()", ""]],
             }))
         });
     }
 
     fn labels(text: &str) -> Vec<String> {
+        labels_with(text, &[])
+    }
+
+    fn labels_with(text: &str, params: &[Item]) -> Vec<String> {
         fixture();
         let cols = [String::from("金额"), String::from("医院 名称")];
-        complete(text, text.len(), &cols, false).items.into_iter().map(|i| i.label).collect()
+        complete(text, text.len(), &cols, params, false, "").items.into_iter().map(|i| i.label).collect()
+    }
+
+    fn ch_items() -> Vec<Item> {
+        vec![
+            Item { label: String::from("倍率"), detail: String::from("乘数"), doc: String::from("每行乘的数") },
+            Item { label: String::from("城市"), detail: String::from("参数"), doc: String::new() },
+        ]
     }
 
     #[test]
@@ -529,7 +739,7 @@ mod tests {
         assert!(labels("").is_empty());
         let cols = [String::from("金额"), String::from("医院 名称")];
         let sql = |text: &str| -> Vec<String> {
-            complete(text, text.len(), &cols, true).items.into_iter().map(|i| i.label).collect()
+            complete(text, text.len(), &cols, &[], true, "").items.into_iter().map(|i| i.label).collect()
         };
         assert_eq!(sql("select 医"), ["\"医院 名称\""]);
         assert_eq!(sql("sel"), ["self", "SELECT"]);
@@ -538,9 +748,64 @@ mod tests {
     }
 
     #[test]
+    fn completes_params_and_paths() {
+        let ps = ch_items();
+        assert_eq!(labels_with("ch(\"", &ps), ["倍率", "城市"]);
+        assert_eq!(labels_with("out = df.filter(ch(\"城", &ps), ["城市"]);
+        // 已经打完整了就不再弹
+        assert!(labels_with("ch(\"城市", &ps).is_empty());
+        // ch 之外的字符串还是补列名
+        assert_eq!(labels_with("pl.col(\"金", &ps), ["金额"]);
+        // 路径函数的字符串参数补文件路径
+        let dir = std::env::temp_dir().join(format!("rtv_complete_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("子目录")).unwrap();
+        std::fs::write(dir.join("sales.xlsx"), "").unwrap();
+        std::fs::write(dir.join("notes.txt"), "").unwrap();
+        let d = dir.to_string_lossy().replace('/', "\\");
+        let at = |text: String| -> Vec<String> {
+            fixture();
+            complete(&text, text.len(), &[], &[], false, "").items.into_iter().map(|i| i.label).collect()
+        };
+        let base = format!("pl.read_csv(\"{d}\\");
+        assert_eq!(at(format!("{base}")), ["子目录\\", "notes.txt", "sales.xlsx"]);
+        assert_eq!(at(format!("{base}子")), ["子目录\\"]);
+        assert_eq!(at(format!("{base}s")), ["sales.xlsx"]);
+        // 换了分隔符（正斜杠）照样补，文件夹的名字跟着用 /
+        let base = format!("pl.read_csv(\"{}/", dir.to_string_lossy());
+        assert_eq!(at(format!("{base}")), ["子目录/", "notes.txt", "sales.xlsx"]);
+        // 列名函数里不补路径
+        assert!(at(format!("pl.col(\"{d}\\")).is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn completes_kwargs() {
+        fixture();
+        let labels =
+            |text: &str| -> Vec<String> { complete(text, text.len(), &[], &[], false, "").items.into_iter().map(|i| i.label).collect() };
+        let details = |text: &str| -> Vec<String> {
+            complete(text, text.len(), &[], &[], false, "").items.into_iter().map(|i| i.detail).collect()
+        };
+        assert_eq!(labels("pl.read_csv("), ["source=", "encoding=", "n_rows="]);
+        assert_eq!(details("pl.read_csv("), ["必填", "'utf8'", "0"]);
+        assert_eq!(labels("pl.read_csv(e"), ["encoding="]);
+        // 已经填过的不列
+        assert_eq!(labels("pl.read_csv(encoding=\"utf8\", n"), ["n_rows="]);
+        // = 后面是值，不弹
+        assert!(labels("pl.read_csv(encoding=").is_empty());
+        // 前缀筛不中参数时退回普通补全
+        assert_eq!(labels("pl.read_csv(pl."), ["col", "lit", "concat"]);
+        // 全是位置参数（*predicates）的打完 ( 不弹
+        assert!(labels("df.filter(").is_empty());
+        // 必填的也能按前缀补
+        assert_eq!(labels("pl.read_csv(s"), ["source="]);
+    }
+
+    #[test]
     fn replace_press_and_hint() {
         let text = "df.fi + 1";
-        let found = complete(text, 5, &[], false);
+        let found = complete(text, 5, &[], &[], false, "");
         assert_eq!(found.start, 3);
         assert_eq!(replace(text, found.start, 5, "filter"), (String::from("df.filter + 1"), 9));
         assert_eq!(press("ab", 1, 1, "tab"), (String::from("a    b"), 5));

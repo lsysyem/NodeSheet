@@ -566,7 +566,23 @@ pub(crate) fn code_assist(app: &AppWindow, st: &mut App, text: &str, cursor: usi
         }
     }
     set_code_layers(app, text, sql);
-    let found = complete::complete(text, cursor, &columns, sql);
+    // ch("…") 里补全的参数名：这个节点定义的全部参数
+    let params: Vec<complete::Item> = node
+        .kind()
+        .params
+        .iter()
+        .map(|p| complete::Item {
+            label: p.name.clone(),
+            detail: if p.label.is_empty() || p.label == p.name { String::from("参数") } else { p.label.clone() },
+            doc: p.hint.clone(),
+        })
+        .collect();
+    // 路径函数里没写目录时：从当前打开的文件所在目录开始列
+    let fallback = std::path::Path::new(&st.graph.file)
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let found = complete::complete(text, cursor, &columns, &params, sql, &fallback);
     let items: Vec<CompletionItem> = found
         .items
         .iter()
