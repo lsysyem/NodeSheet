@@ -462,6 +462,18 @@ export component NodePanel inherits Rectangle {
             height: parent.height - 60px - (root.node-code != "" ? 28px : 0px);
             background: Theme.param-bg;
 
+            // 量最宽的参数标签（竖排布局的首选宽 = 各标签里最宽的）：标签列跟着它，太长的才省略
+            label-measure := VerticalLayout {
+                x: 0;
+                y: 0;
+                width: 0px;
+                height: 0px;
+                for p in root.node-params: Text {
+                    text: p.label;
+                    font-size: 12px;
+                }
+            }
+
             ScrollView {
             params-box := VerticalLayout {
                 alignment: start;
@@ -532,7 +544,7 @@ export component NodePanel inherits Rectangle {
                         spacing: 10px;
 
                         if p.kind != 1: Text {
-                            width: 96px;
+                            width: max(96px, min(label-measure.preferred-width + 6px, 200px));
                             text: p.label;
                             color: Theme.text-muted;
                             font-size: 12px;
