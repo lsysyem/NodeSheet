@@ -2,6 +2,7 @@
 #   dist\NodeSheet\NodeSheet.exe
 #   dist\NodeSheet\engine\      随包的 Python + polars + fastexcel + xlsxwriter（节点功能用，对方不用装 Python）
 # 运行时取自本机的 Python 安装（需要已 pip install -U "polars>=2.0.0" fastexcel xlsxwriter），不联网。
+# Excel 读取优先用 engine\wheels 里打过补丁的 fastexcel（engine/build_fastexcel.py 用 calamine fork 编的）。
 # 用法：pwsh .\package.ps1
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
@@ -48,9 +49,28 @@ foreach ($site in $sites) {
 # ._pth：只认包里的路径，不受对方机器上的 Python / 环境变量影响
 Set-Content "$engine\python$tag._pth" "DLLs`nLib`nLib\site-packages" -Encoding ascii
 
+# Excel 读取：engine\wheels 里有打过补丁的 fastexcel 就换掉随包的普通版
+# （engine/build_fastexcel.py 用 calamine fork 编的，xlsx 并行解析）
+$fxWheel = Get-ChildItem "engine\wheels\fastexcel-*.whl" -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($fxWheel) {
+    $tmp = Join-Path $env:TEMP "nodesheet-fastexcel"
+    if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
+    Expand-Archive $fxWheel.FullName -DestinationPath $tmp
+    Remove-Item "$engine\Lib\site-packages\fastexcel" -Recurse -Force -ErrorAction SilentlyContinue
+    Copy-Item "$tmp\fastexcel" "$engine\Lib\site-packages\fastexcel" -Recurse
+    Remove-Item $tmp -Recurse -Force
+    Write-Host "fastexcel：用打过补丁的 $($fxWheel.Name)"
+} else {
+    Write-Warning "engine\wheels 里没有打过补丁的 fastexcel：Excel 读取会用普通的 calamine。运行 python engine\build_fastexcel.py --install 生成"
+}
+
 # 确认随包的运行时自己能跑
 $check = & "$engine\python.exe" -c "import sys, polars, fastexcel, xlsxwriter; print(polars.__version__, fastexcel.__version__); print(all(p.startswith(sys.prefix) for p in sys.path))"
 if ($LASTEXITCODE -ne 0 -or $check[1] -ne "True") { throw "随包的 Python 运行时不可用：$check" }
+if ($fxWheel) {
+    $fast = & "$engine\python.exe" -c "import fastexcel; print(getattr(fastexcel, '__nodesheet_fast__', False))"
+    if ($fast -ne "True") { throw "随包的 fastexcel 不是打过补丁的版本：$fast" }
+}
 
 Set-Content "$out\使用说明.txt" -Encoding utf8 @"
 NodeSheet v$version

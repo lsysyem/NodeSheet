@@ -2,10 +2,10 @@
 // 节点图里的节点是窄条：左端旁路旗标、右端显示旗标、中间分类图标，名字和摘要写在节点右边；
 // 中键点节点看它的帮助（连同它输出的情况）。另有“添加”菜单和 Tab 搜索菜单（中键点里面的项也是看帮助）。
 // 双击 expr 节点进到它里面的表达式网络（vop 为真）：节点从左往右连，头上写输出类型，下面一行一个输入端口。
-import { Button, LineEdit, ScrollView, ListView, ComboBox } from "std-widgets.slint";
+import { ScrollView, ListView } from "std-widgets.slint";
 import { Theme, Icons, NodeItem, WireItem, CompletionItem, CodeEdit, ParamItem, KindItem, PortItem } from "theme.slint";
 import { TypeEdit } from "type-editor.slint";
-import { IconButton, Card, CodeEditor, PaneTabs, Pane, CheckBox } from "widgets.slint";
+import { IconButton, Card, CodeEditor, PaneTabs, Pane, CheckBox, Button, LineEdit, ComboBox } from "widgets.slint";
 import { MenuEntry, MenuSeparator2, MenuPanel } from "menubar.slint";
 
 // 节点身上的鼠标（两级的节点通用）：左键按下 / 拖动 / 松开报给 Rust（坐标是画布坐标，Rust 挪选中的那一组），
@@ -349,7 +349,7 @@ export component NodePanel inherits Rectangle {
                         height: 22px;
                         border-radius: 3px;
                         border-width: 1px;
-                        border-color: name-input.has-focus ? Theme.focus : Theme.border-strong;
+                        border-color: name-input.has-focus ? Theme.accent : Theme.border-strong;
                         background: Theme.field;
                         name-input := TextInput {
                             x: 6px;

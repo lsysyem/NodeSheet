@@ -407,6 +407,19 @@ pub(crate) fn install_sel_extra(app: &AppWindow, state: &Arc<Mutex<App>>) {
     });
 }
 
+/// 复制成什么格式。
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum CopyFmt {
+    /// 制表符分列、\r\n 分行，特殊字符加引号（粘到 Excel 正好一格一格对上）
+    Tsv,
+    /// Markdown 表格（第一行是表头，加一条分隔线）
+    Markdown,
+    /// HTML 表格（粘进 Word / 邮件保留成表格）
+    Html,
+    /// 原样文字：一格就是这一格的原文（不加引号），多格也用制表符分
+    Raw,
+}
+
 /// 复制出来的一格：含制表符、换行、引号的按 Excel 的习惯用引号包起来。
 pub(crate) fn push_cell(out: &mut String, cell: &str) {
     if cell.contains(['\t', '\n', '\r', '"']) {
@@ -418,30 +431,124 @@ pub(crate) fn push_cell(out: &mut String, cell: &str) {
     }
 }
 
-/// [r0, r1] × cols 这一块的文本：列之间制表符、行之间 \r\n（粘到 Excel 里正好一格一格对上）。
-pub(crate) fn selection_text(source: &dyn DataSource, rows: std::ops::Range<usize>, cols: &[usize], with_header: bool) -> String {
+/// HTML 里的一格：转义 & < >。
+fn push_html_cell(out: &mut String, cell: &str) {
+    for c in cell.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '\n' | '\r' => out.push(' '),
+            c => out.push(c),
+        }
+    }
+}
+
+/// Markdown 里的一格：竖线和换行要转义（`\|`），换行换成空格。
+fn push_md_cell(out: &mut String, cell: &str) {
+    for c in cell.chars() {
+        match c {
+            '|' => out.push_str("\\|"),
+            '\n' | '\r' => out.push(' '),
+            c => out.push(c),
+        }
+    }
+}
+
+/// [r0, r1] × cols 这一块的文本。Tsv：列之间制表符、行之间 \r\n（粘到 Excel 里正好一格一格对上）；
+/// Markdown / Html 是带表头的表格；Raw 不加引号。
+pub(crate) fn selection_text(
+    source: &dyn DataSource,
+    rows: std::ops::Range<usize>,
+    cols: &[usize],
+    with_header: bool,
+    fmt: CopyFmt,
+) -> String {
+    if fmt == CopyFmt::Markdown || fmt == CopyFmt::Html {
+        return table_text(source, rows, cols, with_header, fmt);
+    }
+    let cell = |out: &mut String, s: &str| {
+        if fmt == CopyFmt::Raw {
+            out.push_str(s);
+        } else {
+            push_cell(out, s);
+        }
+    };
     let mut out = String::new();
     if with_header {
         for (i, &c) in cols.iter().enumerate() {
             if i > 0 {
                 out.push('\t');
             }
-            push_cell(&mut out, source.headers().get(c).map_or("", |h| h.as_str()));
+            cell(&mut out, source.headers().get(c).map_or("", |h| h.as_str()));
         }
         out.push_str("\r\n");
     }
     source.scan(rows.start, rows.len(), cols, &mut |_, cells| {
-        for (i, cell) in cells.iter().enumerate() {
+        for (i, celltext) in cells.iter().enumerate() {
             if i > 0 {
                 out.push('\t');
             }
-            push_cell(&mut out, cell);
+            cell(&mut out, celltext);
         }
         out.push_str("\r\n");
     });
     // 只有一格时不带换行：粘进输入框不会多出一行
     if rows.len() == 1 && cols.len() == 1 && !with_header {
         out.truncate(out.trim_end_matches("\r\n").len());
+    }
+    out
+}
+
+/// 带表头的表格文字（Markdown / HTML）。
+fn table_text(
+    source: &dyn DataSource,
+    rows: std::ops::Range<usize>,
+    cols: &[usize],
+    with_header: bool,
+    fmt: CopyFmt,
+) -> String {
+    let mut out = String::new();
+    let row_text = |out: &mut String, cells: &[&str], header: bool| match fmt {
+        CopyFmt::Markdown => {
+            out.push('|');
+            for c in cells {
+                out.push(' ');
+                push_md_cell(out, c);
+                out.push_str(" |");
+            }
+            out.push('\n');
+            if header {
+                out.push('|');
+                for _ in cells {
+                    out.push_str(" --- |");
+                }
+                out.push('\n');
+            }
+        }
+        _ => {
+            out.push_str(if header { "<tr><th>" } else { "<tr><td>" });
+            for (i, c) in cells.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(if header { "</th><th>" } else { "</td><td>" });
+                }
+                push_html_cell(out, c);
+            }
+            out.push_str(if header { "</th></tr>\n" } else { "</td></tr>\n" });
+        }
+    };
+    if fmt == CopyFmt::Html {
+        out.push_str("<table>\n");
+    }
+    if with_header {
+        let heads: Vec<&str> = cols.iter().map(|&c| source.headers().get(c).map_or("", |h| h.as_str())).collect();
+        row_text(&mut out, &heads, true);
+    }
+    source.scan(rows.start, rows.len(), cols, &mut |_, cells| {
+        row_text(&mut out, cells, false);
+    });
+    if fmt == CopyFmt::Html {
+        out.push_str("</table>");
     }
     out
 }
@@ -581,7 +688,13 @@ fn sel_groups_impl(
 }
 
 /// 把选中的格子复制到剪贴板。整行 / 整列可能很大，取数放到后台线程。
-pub(crate) fn copy_selection(weak: &slint::Weak<AppWindow>, state: &Arc<Mutex<App>>, with_header: bool) {
+/// with_header 只对 Tsv 有作用（Markdown / Html 本来就是带表头的表格）。
+pub(crate) fn copy_selection(
+    weak: &slint::Weak<AppWindow>,
+    state: &Arc<Mutex<App>>,
+    with_header: bool,
+    fmt: CopyFmt,
+) {
     let Some(app) = weak.upgrade() else { return };
     if !app.get_sel_active() {
         return;
@@ -617,10 +730,11 @@ pub(crate) fn copy_selection(weak: &slint::Weak<AppWindow>, state: &Arc<Mutex<Ap
                 rows.clone(),
                 cols.as_ref().unwrap_or(&all),
                 with_header && i == 0,
+                fmt,
             ));
         }
         // 只有一格时不带换行：粘进输入框不会多出一行
-        if rows == 1 && cols == 1 && !with_header {
+        if rows == 1 && cols == 1 && !with_header && fmt == CopyFmt::Tsv {
             text.truncate(text.trim_end_matches("\r\n").len());
         }
         let result = clipboard::set_text(&text);
@@ -633,6 +747,23 @@ pub(crate) fn copy_selection(weak: &slint::Weak<AppWindow>, state: &Arc<Mutex<Ap
             }
         });
     });
+}
+
+/// 复制当前这一格（右键菜单的“复制这个格子的值”）：只要那一格的原文，不加引号、不带表头。
+pub(crate) fn copy_cell(weak: &slint::Weak<AppWindow>, state: &Arc<Mutex<App>>, row: i32, col: i32) {
+    let Some(app) = weak.upgrade() else { return };
+    let (Ok(row), Ok(col)) = (usize::try_from(row), usize::try_from(col)) else { return };
+    let source = {
+        let st = state.lock().unwrap();
+        st.sheets.get(st.current).map(|s| s.source.clone())
+    };
+    let Some(source) = source else { return };
+    let mut text = String::new();
+    source.scan(row, 1, &[col], &mut |_, cells| text.push_str(cells.first().copied().unwrap_or("")));
+    match clipboard::set_text(&text) {
+        Ok(()) => app.set_status(SharedString::from(format!("已复制这一格（{} 字）", text.chars().count()))),
+        Err(e) => app.set_status(SharedString::from(format!("复制失败：{e}"))),
+    }
 }
 
 #[cfg(test)]

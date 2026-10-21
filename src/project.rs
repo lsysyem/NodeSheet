@@ -39,7 +39,9 @@ pub(crate) fn ui_state(app: &AppWindow, st: &App) -> serde_json::Value {
         "pan_y": app.get_pan_y(),
         "font_size": app.get_table_font_size(),
         "theme": st.theme_mode,
+        "ui_style": st.ui_style,
         "wrap": st.wrap_cells,
+        "row_density": st.row_density,
     })
 }
 
@@ -77,9 +79,19 @@ pub(crate) fn apply_ui(app: &AppWindow, st: &mut App, ui: &serde_json::Value, pe
         app.set_theme_mode(st.theme_mode);
         crate::title_bar_theme(app, st.theme_mode);
     }
+    if let Some(v) = ui["ui_style"].as_i64().filter(|_| personal) {
+        st.ui_style = (v as i32).clamp(0, 3);
+        app.set_ui_style(st.ui_style);
+    }
     if let Some(v) = ui["wrap"].as_bool() {
         st.wrap_cells = v;
         app.set_settings_wrap(v);
+    }
+    if let Some(v) = ui["row_density"].as_i64() {
+        st.row_density = (v as i32).clamp(0, 2);
+        app.set_row_density(st.row_density);
+        app.set_row_h_compact(st.row_density == 0);
+        app.set_row_h_loose(st.row_density == 2);
     }
 }
 

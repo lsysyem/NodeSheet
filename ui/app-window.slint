@@ -1,8 +1,8 @@
 // 主窗口：菜单栏 + 工具架 + 主区域（表格面板、节点面板，中间的缝可拖动）+ 状态栏 + 浮层（右键菜单、代码补全）。
 // 界面的全部状态声明在这里，Rust 只和这个组件打交道；两个面板是各自文件里的组件。
-import { ListView, Palette, Button, LineEdit, ComboBox } from "std-widgets.slint";
+import { ListView, Palette } from "std-widgets.slint";
 import { Theme, ColumnSpec, RowData, NodeItem, WireItem, CompletionItem, CodeEdit, ParamItem, KindItem, PortItem, HelpBlock, RecentItem, CondRow } from "theme.slint";
-import { Card, MenuRow, CheckBox } from "widgets.slint";
+import { Card, MenuRow, CheckBox, Button, LineEdit, ComboBox } from "widgets.slint";
 import { TablePanel } from "table-panel.slint";
 import { NodePanel } from "node-panel.slint";
 import { Shelf } from "shelf.slint";
@@ -86,11 +86,64 @@ export component AppWindow inherits Window {
     property <length> ctx-y;
     property <int> ctx-row: -1;              // 右键点的格子：表头行是 -1，行号列是 -1
     property <int> ctx-col: -1;
-    // 表格右键菜单里建节点的快捷操作：sort-asc / sort-desc / count / drop / keep（表头）、only / remove（格子）
+    // 表格右键菜单里建节点的快捷操作：sort-asc / sort-desc / count / drop / keep（表头）、only / remove / filter（格子）
     callback quick-action(string, int, int);
+    // “筛选这列…”：打开条件编辑器（预填这一列和这一格的值）
+    callback open-cond-pick(int, int);
+    pure callback sel-desc() -> string;      // 右键菜单里说清楚复制的是哪一块
     property <string> sel-info: root.sel-epoch >= 0 && root.sel-gen >= 0 ? root.sel-info-text() : "";
     pure callback col-at(length) -> int;     // 表格内容坐标 x 落在第几列
     callback copy-selection(bool);           // 复制选中的格子；true = 带表头
+    callback copy-selection-as(string, bool); // 复制成别种格式：tsv / markdown / html / raw
+    callback copy-cell(int, int);            // 复制这一格的值（原样，不加引号）
+    // 表格右键菜单里的“复制为…”弹出的小菜单
+    property <bool> copy-menu-visible: false;
+    property <length> copy-menu-x;
+    property <length> copy-menu-y;
+
+    // ---- 查找（Ctrl+F）与跳到行（Ctrl+G）
+    // 查找的状态在 Rust（App::find），这里只是显示
+    in-out property <bool> find-open: false;
+    in property <string> find-text;
+    in property <string> find-count;
+    in-out property <int> find-current;
+    in property <int> find-epoch: 0;
+    in property <int> find-row: -1;
+    in property <int> find-col: -1;
+    // 命中列的左边缘 / 宽度（Rust 按列宽算好推过来，滚动到那一列用）
+    in property <float> find-col-x: 0;
+    in property <float> find-col-w: 100;
+    // 查找范围：-1 = 全表；否则列下标。下拉的项（“全表” + 各列名）由 Rust 按当前表推过来
+    in property <int> find-scope: -1;
+    in property <[string]> find-scope-names;
+    pure callback find-hit-cell(int, int) -> bool;
+    callback find-changed(string, bool, int);   // 文字、忽略大小写、范围（-1 = 全表）
+    callback find-scope-changed(int);           // “范围”下拉换了：-1 = 全表，否则列下标
+    callback find-scope-picked(int);            // 表格里选了整列：查找范围跟着走（-1 = 不是单列）
+    callback find-step(int);
+    callback find-close();
+    // 请求带滑出动画地关闭查找浮窗：Esc（全局 key-scope / 输入框里）和 × 都置这个标志，
+    // TablePanel 用 changed 监听并起滑出动画，放完才调 find-close 真正摘掉
+    in-out property <bool> find-close-asked: false;
+    callback find-next(bool);                // 查找条开着时回车 / Shift+回车：下一个 / 上一个
+    callback find-debounced();               // 输入去抖定时器到时：真正开始扫描
+    in-out property <int> scroll-row: -1;    // 跳到行（1 起）
+    in property <int> scroll-seq: 0;         // 每跳一次 +1
+    callback jump-row(string);               // 填的行号文字（Rust 去解析）
+    // “跳到行”的小输入框（Ctrl+G）
+    property <bool> jump-visible: false;
+    in-out property <string> jump-text;
+    callback find-open-request();            // Ctrl+F：Rust 打开查找条（清掉上次的命中）
+
+    // ---- 行高：设置里选的三档（紧凑 / 标准 / 宽松），存进个人设置
+    // 0 紧凑 / 1 标准 / 2 宽松
+    in-out property <int> row-density: 1;
+    callback set-row-density(int);
+    // 字号（表格缩放那项点开的小面板）：9 ~ 28
+    callback set-zoom-percent(int);
+    callback set-zoom-keep-widths(bool);
+    in-out property <bool> zoom-keep-widths: false;
+    property <bool> zoom-panel-visible: false;
 
     function select-all() {
         root.sel-rows = true;
@@ -107,11 +160,20 @@ export component AppWindow inherits Window {
         root.ctx-x = x - key-scope.absolute-position.x;
         root.ctx-y = y - key-scope.absolute-position.y;
         root.ctx-visible = true;
+        root.copy-menu-visible = false;
+    }
+    function open-find() {
+        root.find-open = true;
+        root.focus-area = 1;
+        root.ctx-visible = false;
     }
     in property <bool> drag-hover: false;
     in property <int> theme-mode: 0;         // 0 跟随系统 / 1 浅色 / 2 深色
+    in property <int> ui-style: 0;           // 界面风格：0 Fluent / 1 Cupertino / 2 Material / 3 Cosmic
 
     in property <bool> settings-wrap: false; // 单元格自动换行
+    in property <bool> row-h-compact: false; // 行高紧凑 / 宽松（设置里选的档）
+    in property <bool> row-h-loose: false;
     // 设置 → 显示格式（照 polars 的显示项 pl.Config）：对话框开着时编辑的值，“确定”才应用
     in-out property <bool> fmt-visible: false;
     in-out property <int> fmt-float-mode: 0;      // 0 智能 / 1 完整 / 2 固定小数位
@@ -123,7 +185,7 @@ export component AppWindow inherits Window {
     callback show-display-fmt();                  // 打开对话框：Rust 把当前值推进来
     callback apply-display-fmt();                 // “确定”：应用并存盘、刷新表格
     in-out property <length> table-font-size: 13px; // 表格字号，行高随之变化
-    out property <length> row-h: root.table-font-size + 15px;
+    out property <length> row-h: root.table-font-size + (root.row-h-compact ? 9px : root.row-h-loose ? 23px : 15px);
     // 表格区在窗口里的位置和大小（表格面板报上来的）：Rust 判断 Ctrl + 滚轮落在不在表格上
     out property <length> table-x;
     out property <length> table-y;
@@ -308,6 +370,7 @@ export component AppWindow inherits Window {
     callback quit();
     callback toggle-wrap();
     callback set-theme(int);
+    callback set-ui-style(int);
     callback autofit-columns();   // 列宽重新按内容自适应
 
     // 实际是不是深色（跟随系统时看系统）：窗口标题栏跟着变
@@ -318,6 +381,11 @@ export component AppWindow inherits Window {
     changed theme-mode => {
         Palette.color-scheme = root.theme-mode == 1 ? ColorScheme.light
             : (root.theme-mode == 2 ? ColorScheme.dark : ColorScheme.unknown);
+    }
+
+    // 界面风格：控件和强调色的令牌跟着换（Theme.ui-style）
+    changed ui-style => {
+        Theme.ui-style = root.ui-style;
     }
 
     // ---------------- 主区域 ----------------
@@ -355,6 +423,16 @@ export component AppWindow inherits Window {
                     root.undo(true);
                     return accept;
                 }
+                // 表格里查找 / 跳到行：什么时候都能用（输入框里的 Ctrl+F 用不到，留给查找）
+                if (event.text == "f" || event.text == "F") {
+                    root.find-open-request();
+                    return accept;
+                }
+                if (event.text == "g" || event.text == "G") {
+                    root.jump-visible = true;
+                    root.jump-text = "";
+                    return accept;
+                }
             }
             if (event.text == Key.F5) {
                 root.run-graph();
@@ -371,6 +449,17 @@ export component AppWindow inherits Window {
             }
             if (event.text == Key.Escape && root.help-visible) {
                 root.help-visible = false;
+                return accept;
+            }
+            if (event.text == Key.Escape && root.find-open) {
+                // 和输入框里 Esc / × 走同一滑出动画：放完才摘掉并聚焦回表格
+                root.find-close-asked = !root.find-close-asked;
+                return accept;
+            }
+            if (event.text == Key.Escape && (root.jump-visible || root.zoom-panel-visible || root.copy-menu-visible)) {
+                root.jump-visible = false;
+                root.zoom-panel-visible = false;
+                root.copy-menu-visible = false;
                 return accept;
             }
             if (event.text == Key.Escape && root.fmt-visible) {
@@ -516,6 +605,10 @@ export component AppWindow inherits Window {
                         text: "文件";
                         clicked => { file-menu.show(); }
                     }
+                    edit-title := MenuTitle {
+                        text: "编辑";
+                        clicked => { edit-menu.show(); }
+                    }
                     node-title-m := MenuTitle {
                         text: "节点";
                         clicked => { node-menu.show(); }
@@ -565,6 +658,56 @@ export component AppWindow inherits Window {
                             label: "退出";
                             keys: "Alt+F4";
                             activated => { file-menu.close(); root.quit(); }
+                        }
+                    }
+                }
+
+                edit-menu := PopupWindow {
+                    x: edit-title.x;
+                    y: parent.height - 2px;
+                    width: 280px;
+                    MenuPanel {
+                        MenuEntry {
+                            label: "查找…";
+                            keys: "Ctrl+F";
+                            activated => { edit-menu.close(); root.find-open-request(); }
+                        }
+                        MenuEntry {
+                            label: "跳到行…";
+                            keys: "Ctrl+G";
+                            activated => {
+                                edit-menu.close();
+                                root.jump-visible = true;
+                                root.jump-text = "";
+                            }
+                        }
+                        MenuSeparator2 {}
+                        MenuEntry {
+                            label: "复制";
+                            keys: "Ctrl+C";
+                            activated => { edit-menu.close(); root.copy-selection(false); }
+                        }
+                        MenuEntry {
+                            label: "复制（带表头）";
+                            keys: "Ctrl+Shift+C";
+                            activated => { edit-menu.close(); root.copy-selection(true); }
+                        }
+                        MenuSeparator2 {}
+                        MenuEntry {
+                            label: "撤销";
+                            keys: "Ctrl+Z";
+                            activated => { edit-menu.close(); root.undo(false); }
+                        }
+                        MenuEntry {
+                            label: "重做";
+                            keys: "Ctrl+Y / Ctrl+Shift+Z";
+                            activated => { edit-menu.close(); root.undo(true); }
+                        }
+                        MenuSeparator2 {}
+                        MenuEntry {
+                            label: "全选";
+                            keys: "Ctrl+A";
+                            activated => { edit-menu.close(); root.select-all(); }
                         }
                     }
                 }
@@ -645,9 +788,29 @@ export component AppWindow inherits Window {
                             label: "显示格式…";
                             activated => { set-menu.close(); root.show-display-fmt(); }
                         }
+                        MenuSeparator2 {}
+                        // 行高：三档（紧凑 / 标准 / 宽松）
                         MenuEntry {
-                            label: "表格缩放：" + root.table-zoom-pct() + "%";
-                            checked: root.table-zoom-pct() == 100;
+                            label: "行高：紧凑";
+                            checked: root.row-density == 0;
+                            activated => { set-menu.close(); root.set-row-density(0); }
+                        }
+                        MenuEntry {
+                            label: "行高：标准";
+                            checked: root.row-density == 1;
+                            activated => { set-menu.close(); root.set-row-density(1); }
+                        }
+                        MenuEntry {
+                            label: "行高：宽松";
+                            checked: root.row-density == 2;
+                            activated => { set-menu.close(); root.set-row-density(2); }
+                        }
+                        MenuEntry {
+                            label: "表格字号 / 缩放：" + root.table-zoom-pct() + "%";
+                            activated => { set-menu.close(); root.zoom-panel-visible = !root.zoom-panel-visible; }
+                        }
+                        MenuEntry {
+                            label: "重置字号到 100%";
                             activated => { set-menu.close(); root.reset-zoom(); }
                         }
                         MenuSeparator2 {}
@@ -676,6 +839,28 @@ export component AppWindow inherits Window {
                             label: "主题：深色";
                             checked: root.theme-mode == 2;
                             activated => { set-menu.close(); root.set-theme(2); }
+                        }
+                        MenuSeparator2 {}
+                        // 界面风格：控件和强调色（Fluent / Cupertino / Material / Cosmic）
+                        MenuEntry {
+                            label: "界面风格：Fluent";
+                            checked: root.ui-style == 0;
+                            activated => { set-menu.close(); root.set-ui-style(0); }
+                        }
+                        MenuEntry {
+                            label: "界面风格：Cupertino";
+                            checked: root.ui-style == 1;
+                            activated => { set-menu.close(); root.set-ui-style(1); }
+                        }
+                        MenuEntry {
+                            label: "界面风格：Material";
+                            checked: root.ui-style == 2;
+                            activated => { set-menu.close(); root.set-ui-style(2); }
+                        }
+                        MenuEntry {
+                            label: "界面风格：Cosmic";
+                            checked: root.ui-style == 3;
+                            activated => { set-menu.close(); root.set-ui-style(3); }
                         }
                     }
                 }
@@ -745,7 +930,30 @@ export component AppWindow inherits Window {
                     ctrl-pick-col(c) => { root.ctrl-pick-col(c); }
                     ctrl-drag-col-to(c) => { root.ctrl-drag-col-to(c); }
                     settings-wrap: root.settings-wrap;
+                    row-h-compact: root.row-density == 0;
+                    row-h-loose: root.row-density == 2;
                     table-font-size: root.table-font-size;
+                    find-open: root.find-open;
+                    find-text: root.find-text;
+                    find-count: root.find-count;
+                    find-current: root.find-current;
+                    find-epoch: root.find-epoch;
+                    find-row: root.find-row;
+                    find-col: root.find-col;
+                    find-col-x: root.find-col-x;
+                    find-col-w: root.find-col-w;
+                    find-scope: root.find-scope;
+                    find-scope-names: root.find-scope-names;
+                    find-hit-cell(r, c) => { return root.find-hit-cell(r, c); }
+                    find-changed(t, ic, sc) => { root.find-changed(t, ic, sc); }
+                    find-step(d) => { root.find-step(d); }
+                    find-close => { root.find-close(); }
+                    find-debounced => { root.find-debounced(); }
+                    find-scope-changed(s) => { root.find-scope-changed(s); }
+                    find-scope-picked(s) => { root.find-scope-picked(s); }
+                    find-close-asked <=> root.find-close-asked;
+                    scroll-row: root.scroll-row;
+                    scroll-seq: root.scroll-seq;
                     table-rect(x, y, w, h) => {
                         root.table-x = x;
                         root.table-y = y;
@@ -1039,9 +1247,11 @@ export component AppWindow inherits Window {
         }
         if root.ctx-visible: ctx-card := Card {
             x: max(4px, min(root.ctx-x, key-scope.width - self.width - 8px));
-            y: max(4px, min(root.ctx-y, key-scope.height - self.height - 8px));
             width: 236px;
-            height: ctx-layout.preferred-height;
+            // 从点的地方往下放；下面放不下就往上翻
+            property <length> wanted-y: root.ctx-y;
+            y: max(4px, min(self.wanted-y, key-scope.height - self.height - 8px));
+            height: min(ctx-layout.preferred-height, key-scope.height - 16px);
             border-radius: 8px;
 
             // 点在表头 / 格子上时多几项：在表格显示的节点后面建好节点（quick.rs）
@@ -1070,6 +1280,19 @@ export component AppWindow inherits Window {
                         clicked => { ctx-card.act("count"); }
                     }
                     MenuRow {
+                        label: "筛选这列…";
+                        keys: "包含 / 大于 / 介于…";
+                        clicked => {
+                            root.ctx-visible = false;
+                            root.open-cond-pick(root.ctx-row, root.ctx-col);
+                        }
+                    }
+                    MenuRow {
+                        label: "在表里查找…";
+                        keys: "Ctrl+F";
+                        clicked => { root.ctx-visible = false; root.open-find(); }
+                    }
+                    MenuRow {
                         label: ctx-card.many-cols ? "去掉选中的列" : "去掉这列";
                         clicked => { ctx-card.act("drop"); }
                     }
@@ -1087,6 +1310,22 @@ export component AppWindow inherits Window {
                     MenuRow {
                         label: "去掉等于这个值的行";
                         clicked => { ctx-card.act("remove"); }
+                    }
+                    MenuRow {
+                        label: "筛选这列…";
+                        keys: "包含 / 大于 / 介于…";
+                        clicked => {
+                            root.ctx-visible = false;
+                            root.open-cond-pick(root.ctx-row, root.ctx-col);
+                        }
+                    }
+                    MenuRow {
+                        label: "复制这一格的值";
+                        keys: "原样，不加引号";
+                        clicked => {
+                            root.ctx-visible = false;
+                            root.copy-cell(root.ctx-row, root.ctx-col);
+                        }
                     }
                     MenuSeparator2 {}
                 }
@@ -1106,6 +1345,16 @@ export component AppWindow inherits Window {
                         root.copy-selection(true);
                     }
                 }
+                // 复制为…：点一下在右边弹出小菜单
+                MenuRow {
+                    label: "复制为…";
+                    keys: "TSV / Markdown / HTML";
+                    clicked => {
+                        root.copy-menu-x = root.ctx-x + self.width;
+                        root.copy-menu-y = root.ctx-y;
+                        root.copy-menu-visible = true;
+                    }
+                }
                 MenuRow {
                     label: "全选";
                     keys: "Ctrl+A";
@@ -1114,8 +1363,174 @@ export component AppWindow inherits Window {
                         root.select-all();
                     }
                 }
+                // 复制的是哪一块（灰字，消除歧义）
+                VerticalLayout {
+                    height: 22px;
+                    Text {
+                        text: "复制范围：" + root.sel-desc();
+                        color: Theme.text-faint;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
             }
         }
+
+        // 复制为…的小菜单：TSV / Markdown / HTML / 原样
+        if root.copy-menu-visible && root.ctx-visible: TouchArea {
+            clicked => { root.copy-menu-visible = false; }
+        }
+        if root.copy-menu-visible && root.ctx-visible: Card {
+            x: max(4px, min(root.copy-menu-x, key-scope.width - self.width - 8px));
+            y: max(4px, min(root.copy-menu-y, key-scope.height - self.height - 8px));
+            width: 220px;
+            height: copy-layout.preferred-height;
+            border-radius: 8px;
+
+            copy-layout := VerticalLayout {
+                padding: 4px;
+                MenuRow {
+                    label: "表格（制表符）";
+                    keys: "Ctrl+C";
+                    clicked => {
+                        root.copy-menu-visible = false;
+                        root.ctx-visible = false;
+                        root.copy-selection-as("tsv", false);
+                    }
+                }
+                MenuRow {
+                    label: "Markdown 表格";
+                    clicked => {
+                        root.copy-menu-visible = false;
+                        root.ctx-visible = false;
+                        root.copy-selection-as("markdown", true);
+                    }
+                }
+                MenuRow {
+                    label: "HTML 表格";
+                    keys: "粘进 Word / 邮件";
+                    clicked => {
+                        root.copy-menu-visible = false;
+                        root.ctx-visible = false;
+                        root.copy-selection-as("html", true);
+                    }
+                }
+                MenuRow {
+                    label: "原样文字（不加引号）";
+                    clicked => {
+                        root.copy-menu-visible = false;
+                        root.ctx-visible = false;
+                        root.copy-selection-as("raw", false);
+                    }
+                }
+            }
+        }
+
+        // ---------------- 跳到行（Ctrl+G）----------------
+        if root.jump-visible: TouchArea {
+            clicked => { root.jump-visible = false; }
+        }
+        if root.jump-visible: Card {
+            x: (parent.width - self.width) / 2;
+            y: max(24px, (parent.height - self.height) / 2 - 80px);
+            width: 300px;
+            height: 64px;
+            border-radius: 8px;
+
+            HorizontalLayout {
+                padding: 10px;
+                spacing: 8px;
+                Text {
+                    text: "跳到行";
+                    color: Theme.text;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+                jump-input := LineEdit {
+                    horizontal-stretch: 1;
+                    placeholder-text: "第几行（1 起）";
+                    text <=> root.jump-text;
+                    accepted(t) => {
+                        root.jump-visible = false;
+                        root.jump-row(t);
+                    }
+                    key-pressed(e) => {
+                        if (e.text == Key.Escape) {
+                            root.jump-visible = false;
+                            return accept;
+                        }
+                        return reject;
+                    }
+                }
+            }
+            init => { jump-input.focus(); }
+        }
+
+        // ---------------- 表格字号 / 缩放的小面板 ----------------
+        if root.zoom-panel-visible: TouchArea {
+            clicked => { root.zoom-panel-visible = false; }
+        }
+        if root.zoom-panel-visible: Card {
+            x: (parent.width - self.width) / 2;
+            y: max(24px, (parent.height - self.height) / 2);
+            width: 300px;
+            height: zoom-body.preferred-height + 24px;
+            border-radius: 8px;
+
+            zoom-body := VerticalLayout {
+                padding: 12px;
+                spacing: 8px;
+
+                Text {
+                    text: "表格字号 · 现在 " + root.table-zoom-pct() + "%";
+                    color: Theme.text;
+                    font-size: 13px;
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    for z in [75, 85, 100, 115, 130, 150, 175]: Rectangle {
+                        height: 26px;
+                        min-width: 36px;
+                        border-radius: 4px;
+                        background: z == root.table-zoom-pct() ? Theme.accent-soft
+                            : (z-ta.has-hover ? Theme.hover : Theme.surface-alt);
+                        border-width: 1px;
+                        border-color: z == root.table-zoom-pct() ? Theme.accent : Theme.border;
+                        z-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.set-zoom-percent(z); }
+                        }
+                        Text {
+                            text: z + "%";
+                            color: z == root.table-zoom-pct() ? Theme.accent : Theme.text-muted;
+                            font-size: 11.5px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: "只改字号、不缩放列宽";
+                        color: Theme.text-muted;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                    CheckBox {
+                        checked <=> root.zoom-keep-widths;
+                        toggled(v) => { root.set-zoom-keep-widths(v); }
+                        text: "";
+                    }
+                    Button {
+                        text: "关闭";
+                        clicked => { root.zoom-panel-visible = false; }
+                    }
+                }
+            }
+        }
+
 
         // ---------------- 设置 → 显示格式：照 polars 的显示项（pl.Config）----------------
         // 点外面 / Esc / ✕ 都是关掉不应用，“确定”才应用
@@ -1271,8 +1686,7 @@ export component AppWindow inherits Window {
             }
         }
 
-        // 代码补全列表：浮在所有面板之上，跟着编辑框里的光标；下面放不下就翻到光标上面。
-        // 列出全部候选，一屏 8 行，多的滚动看。↑↓ 选择，Tab / 回车确认，Esc 关闭
+        // 代码补全列表：浮在所有面板之上，跟着编辑框里的光标；下面放不下就翻到光标上面。        // 列出全部候选，一屏 8 行，多的滚动看。↑↓ 选择，Tab / 回车确认，Esc 关闭
         if root.ac-items.length > 0: Card {
             property <length> wanted-y: root.ac-y + 22px;
             property <length> row-h: 24px;

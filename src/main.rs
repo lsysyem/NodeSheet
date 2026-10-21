@@ -58,11 +58,17 @@ struct App {
     current: usize,
     /// 设置：表格数据单元格自动换行
     wrap_cells: bool,
+    /// 行高：0 紧凑 / 1 标准 / 2 宽松（存进个人设置）
+    row_density: i32,
+    /// 改字号时列宽跟着缩（false = 只改字号，列宽不动；字号面板上的勾）
+    zoom_keep_widths: bool,
     /// 各列宽度（含用户拖拽结果）和是否数值列（取样判定，右对齐用）；换表时清空
     col_widths: Vec<f32>,
     col_numeric: Vec<bool>,
     /// 主题：0 跟随系统 / 1 浅色 / 2 深色
     theme_mode: i32,
+    /// 界面风格：0 Fluent / 1 Cupertino / 2 Material / 3 Cosmic（控件和强调色，存进个人设置）
+    ui_style: i32,
     /// 节点图
     graph: graph::Graph,
     /// 节点面板正显示哪一级：空 = 表格级的节点图；[expr] = 那个 expr 节点里面的表达式网络；
@@ -139,6 +145,8 @@ struct App {
     /// Ctrl 按住的拖动：锚点 + 方向（true = 加选）。按下时定，拖动经过的行 / 列统一应用
     pick_anchor: i32,
     pick_adding: bool,
+    /// 表格的查找（Ctrl+F）：命中的格子、跳到哪一条（见 view.rs 的 Find）
+    find: view::Find,
 }
 
 impl App {
@@ -235,7 +243,7 @@ fn main() {
     engine::sweep_stale();
     let app = AppWindow::new().expect("无法创建窗口");
     // 默认深色（Houdini 的样子）；上次的主题、布局、窗口大小、最近打开的文件在个人设置里
-    let state = Arc::new(Mutex::new(App { theme_mode: 2, ..App::default() }));
+    let state = Arc::new(Mutex::new(App { theme_mode: 2, row_density: 1, ..App::default() }));
     app.set_theme_mode(2);
     settings::apply(&app, &mut state.lock().unwrap());
 
@@ -326,6 +334,18 @@ fn main() {
             if let Some(app) = weak.upgrade() {
                 app.set_theme_mode(st.theme_mode);
                 title_bar_theme(&app, st.theme_mode);
+                settings::save(&app, &st);
+            }
+        });
+    }
+    {
+        let weak = app.as_weak();
+        let state = state.clone();
+        app.on_set_ui_style(move |style| {
+            let mut st = state.lock().unwrap();
+            st.ui_style = style.clamp(0, 3);
+            if let Some(app) = weak.upgrade() {
+                app.set_ui_style(st.ui_style);
                 settings::save(&app, &st);
             }
         });
@@ -425,6 +445,37 @@ fn main() {
     }
 
     {
+        // 行高：紧凑 / 标准 / 宽松（存进个人设置）
+        let weak = app.as_weak();
+        let state = state.clone();
+        app.on_set_row_density(move |d| {
+            let Some(app) = weak.upgrade() else { return };
+            let mut st = state.lock().unwrap();
+            st.row_density = d.clamp(0, 2);
+            app.set_row_density(st.row_density);
+            app.set_row_h_compact(st.row_density == 0);
+            app.set_row_h_loose(st.row_density == 2);
+            settings::save(&app, &st);
+        });
+    }
+    {
+        let weak = app.as_weak();
+        let state = state.clone();
+        app.on_set_zoom_keep_widths(move |keep| {
+            if let Some(app) = weak.upgrade() {
+                state.lock().unwrap().zoom_keep_widths = keep;
+                app.set_zoom_keep_widths(keep);
+            }
+        });
+    }
+    {
+        // 右键菜单的“筛选这列…”：在显示的节点后面建一个 filter 节点（条件树先放一条“这一列 = 这一格的值”），
+        // 选中它并打开条件编辑器——用户接着改操作（包含 / 大于 / 介于…）和值。
+        let weak = app.as_weak();
+        let state = state.clone();
+        app.on_open_cond_pick(move |row, col| quick::filter_this_column(&weak, &state, row, col));
+    }
+    {
         // 表格内容坐标 x 落在第几列（拖动选择时界面来问）
         let weak = app.as_weak();
         app.on_col_at(move |x| {
@@ -444,7 +495,148 @@ fn main() {
     {
         let weak = app.as_weak();
         let state = state.clone();
-        app.on_copy_selection(move |with_header| copy_selection(&weak, &state, with_header));
+        app.on_copy_selection(move |with_header| copy_selection(&weak, &state, with_header, CopyFmt::Tsv));
+    }
+    {
+        // 复制成不同格式（右键菜单的小箭头）：格式见 selection::CopyFmt
+        let weak = app.as_weak();
+        let state = state.clone();
+        app.on_copy_selection_as(move |fmt, with_header| {
+            let fmt = match fmt.as_str() {
+                "markdown" => CopyFmt::Markdown,
+                "html" => CopyFmt::Html,
+                "raw" => CopyFmt::Raw,
+                _ => CopyFmt::Tsv,
+            };
+            copy_selection(&weak, &state, with_header, fmt);
+        });
+    }
+    {
+        let weak = app.as_weak();
+        let state = state.clone();
+        app.on_copy_cell(move |row, col| copy_cell(&weak, &state, row, col));
+    }
+    {
+        // 格子的查找命中（黄底）：命中表按行列排好，二分找；读 find-epoch 建依赖
+        let weak = app.as_weak();
+        let state = state.clone();
+        app.on_find_hit_cell(move |r, c| {
+            let Some(app) = weak.upgrade() else { return false };
+            let _ = app.get_find_epoch();
+            let Ok(st) = state.try_lock() else { return false };
+            find_hit_at(&st, r, c)
+        });
+    }
+    {
+        // 右键菜单：复制的是哪一块（“已选 3 行 × 2 列”之类）
+        let weak = app.as_weak();
+        let state = state.clone();
+        app.on_sel_desc(move || {
+            let Some(app) = weak.upgrade() else { return SharedString::default() };
+            let Ok(st) = state.try_lock() else { return SharedString::default() };
+            let (n_rows, n_cols) = st
+                .sheets
+                .get(st.current)
+                .map_or((0, 0), |s| (s.source.row_count(), s.source.headers().len()));
+            let groups = sel_groups(&app, &st, n_rows, n_cols);
+            let rows: usize = groups.iter().map(|(r, _)| r.len()).sum();
+            let cols: usize = groups.iter().map(|(_, c)| c.as_ref().map_or(n_cols, |c| c.len())).max().unwrap_or(0);
+            SharedString::from(format!("{rows} 行 × {cols} 列"))
+        });
+    }
+    {
+        // 表格里查找（Ctrl+F）：查找条上的文字 / 忽略大小写一变就从头扫
+        let weak = app.as_weak();
+        let state = state.clone();
+        app.on_find_changed(move |text, ignore_case, scope| {
+            let column = if scope < 0 { None } else { Some(scope as usize) };
+            find_start(&weak, &state, text.to_string(), ignore_case, column)
+        });
+    }
+    {
+        let weak = app.as_weak();
+        let state = state.clone();
+        app.on_find_step(move |dir| find_step(&weak, &state, dir));
+    }
+    {
+        let weak = app.as_weak();
+        let state = state.clone();
+        app.on_find_close(move || {
+            let mut st = state.lock().unwrap();
+            if let Some(app) = weak.upgrade() {
+                find_close(&app, &mut st);
+            }
+        });
+    }
+    {
+        // 查找去抖定时器到时（停顿 250ms 后）：真正开始扫描
+        let weak = app.as_weak();
+        let state = state.clone();
+        app.on_find_debounced(move || find_debounced(&weak, &state));
+    }
+    {
+        // 查找范围换了一列（或换回全表）：立刻按新范围重扫
+        let weak = app.as_weak();
+        let state = state.clone();
+        app.on_find_scope_changed(move |scope| {
+            let column = if scope < 0 { None } else { Some(scope as usize) };
+            find_set_column(&weak, &state, column);
+        });
+    }
+    {
+        // 表格里改选了一整列（查找开着时）：范围跟着走
+        let weak = app.as_weak();
+        let state = state.clone();
+        app.on_find_scope_picked(move |scope| {
+            let column = if scope < 0 { None } else { Some(scope as usize) };
+            find_set_column(&weak, &state, column);
+        });
+    }
+    {
+        // 查找条开着时按回车 / Shift+回车：跳下一个 / 上一个
+        let weak = app.as_weak();
+        let state = state.clone();
+        app.on_find_next(move |back| find_step(&weak, &state, if back { -1 } else { 1 }));
+    }
+    {
+        // 跳到行（Ctrl+G）：解析填的行号，表格滚过去（scroll-seq +1，同一行也能再滚）
+        let app_weak = app.as_weak();
+        app.on_jump_row(move |text| {
+            let Some(app) = app_weak.upgrade() else { return };
+            let digits: String =
+                text.chars().filter(|c| c.is_ascii_digit() || *c == ' ' || *c == '_').collect::<String>().replace([' ', '_'], "");
+            let Ok(row) = digits.parse::<i32>() else {
+                app.set_status(SharedString::from("跳到行：填一个行号（1 起）"));
+                return;
+            };
+            let n = app.get_rows().row_count().max(1) as i32;
+            let row = row.clamp(1, n);
+            app.set_scroll_row(row);
+            app.set_scroll_seq(app.get_scroll_seq() + 1);
+            app.set_status(SharedString::from(format!("跳到第 {row} 行（共 {n} 行）")));
+        });
+    }
+    {
+        // Ctrl+F：打开查找条（清掉上次的命中）
+        let weak = app.as_weak();
+        let state = state.clone();
+        app.on_find_open_request(move || find_open(&weak, &state));
+    }
+    {
+        // 字号面板按百分比（列宽跟着缩；"只改字号"勾着时列宽不动）
+        let weak = app.as_weak();
+        let state = state.clone();
+        app.on_set_zoom_percent(move |pct| {
+            let Some(app) = weak.upgrade() else { return };
+            let mut st = state.lock().unwrap();
+            let size = (13.0 * pct as f32 / 100.0).clamp(9.0, 28.0);
+            if st.zoom_keep_widths {
+                app.set_table_font_size(size);
+            } else {
+                zoom_table(&app, &mut st, size);
+            }
+            settings::save(&app, &st);
+        });
     }
     {
         // Ctrl 加选不连续的行 / 列：块存 Rust，高亮和状态栏走纯回调（读 sel-epoch / sel-gen 建依赖）

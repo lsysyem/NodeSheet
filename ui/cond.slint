@@ -1,9 +1,9 @@
 // 筛选节点的条件编辑器（cond.rs）：一列 + 一个操作 + 一个值算一个条件；条件之间“且 / 或”（点左边那个小方块换），
 // 还能分组——分组占一行，组里的条件缩进在它下面，组里单独选“且 / 或”。
 // 状态全在 Rust，这里只画、只报。
-import { LineEdit, ComboBox, ScrollView, Button } from "std-widgets.slint";
+import { ScrollView } from "std-widgets.slint";
 import { Theme, Icons, CondRow } from "theme.slint";
-import { Card, IconButton } from "widgets.slint";
+import { Card, IconButton, LineEdit, ComboBox, Button } from "widgets.slint";
 
 export global CondPick {
     in-out property <bool> open;

@@ -1,9 +1,9 @@
 // 节点类型编辑器（像 Houdini 的 Type Properties / Edit Parameter Interface）：
 // 左边是参数类型（或已有节点上的参数），拖到中间的参数表里就加一个；中间拖动排序；右边改选中参数的属性。
 // 编辑的是 Rust 里的一份草稿，点“应用”才生效。状态都在全局 TypeEdit 上，Rust 直接读写它。
-import { Button, LineEdit, ComboBox, Switch, ListView, TextEdit } from "std-widgets.slint";
+import { Switch, ListView, TextEdit } from "std-widgets.slint";
 import { Theme, Icons, CodeEdit } from "theme.slint";
-import { IconButton, Card, CodeEditor, CheckBox } from "widgets.slint";
+import { IconButton, Card, CodeEditor, CheckBox, Button, LineEdit, ComboBox } from "widgets.slint";
 
 // 中间参数表的一行
 export struct EdParam {

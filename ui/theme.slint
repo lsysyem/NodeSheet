@@ -123,10 +123,80 @@ export struct HelpBlock {
     indent: bool,  // 参数条目下面的说明
 }
 
-// 颜色令牌：全部由当前配色（浅/深）推导，界面里不写死颜色
+// 颜色令牌：全部由当前配色（浅/深）推导，界面里不写死颜色。
+// ui-style 换界面风格（Fluent / Cupertino / Material / Cosmic）：只有控件和强调色跟它走，
+// 配色取自 slint 各风格的控件源码（widgets/<风格>/styling.slint 的 *Palette）；面板、表格、
+// 节点图是 NodeSheet 自己的皮，形状跟着变（圆角、控件高），颜色不动。
 export global Theme {
+    // 界面风格：0 Fluent / 1 Cupertino / 2 Material / 3 Cosmic（设置菜单里换，存进个人设置）
+    in-out property <int> ui-style: 0;
     // 跟随系统时 Palette.color-scheme 读回 unknown，用前景色判断实际深浅
     out property <bool> dark: Palette.foreground == #ffffff;
+
+    // ---- 风格：控件的形状（照各风格的 Button / LineEdit 源码）----
+    out property <length> btn-radius: ui-style == 1 ? 5px : ui-style == 2 ? 20px : ui-style == 3 ? 16px : 4px;
+    out property <length> field-radius: ui-style == 1 ? 5px : ui-style == 2 ? 4px : ui-style == 3 ? 8px : 4px;
+    out property <length> card-radius: ui-style == 1 ? 10px : ui-style == 2 ? 12px : ui-style == 3 ? 8px : 10px;
+    out property <length> ctrl-h: ui-style == 1 ? 26px : ui-style == 2 ? 36px : ui-style == 3 ? 32px : 30px;
+    out property <length> btn-h: ui-style == 1 ? 24px : ui-style == 2 ? 36px : ui-style == 3 ? 32px : 30px;
+    out property <length> field-pad: ui-style == 1 ? 7px : ui-style == 2 ? 16px : ui-style == 3 ? 16px : 12px;
+    out property <length> btn-pad: ui-style == 1 ? 10px : ui-style == 2 ? 24px : ui-style == 3 ? 12px : 12px;
+    out property <length> field-font: ui-style == 2 ? 14px : 12px;
+    // 次要按钮描边：只有 fluent 是“浅底 + 描边”，别的风格是填充
+    out property <length> btn-border-w: ui-style == 0 ? 1px : 0px;
+    // 输入框的焦点怎么画：1 底部一道横线（fluent）/ 2 外圈（cupertino）/ 3 边框加粗（material）/ 4 外圈细线（cosmic）
+    out property <int> field-focus: ui-style == 1 ? 2 : ui-style == 2 ? 3 : ui-style == 3 ? 4 : 1;
+
+    // ---- 风格：强调色（各系统的主色）----
+    out property <color> accent: ui-style == 1 ? (dark ? #74a3f0 : #2f66cd)
+        : ui-style == 2 ? (dark ? #d0bcff : #6750A4)
+        : ui-style == 3 ? (dark ? #63D0DF : #00525A)
+        : (dark ? #60CDFF : #005FB8);
+    out property <color> accent-bg: ui-style == 1 ? (dark ? #3f76d6 : #326CCF)
+        : ui-style == 2 ? (dark ? #d0bcff : #6750A4)
+        : ui-style == 3 ? (dark ? #63D0DF : #00525A)
+        : (dark ? #60CDFF : #005FB8);
+    out property <color> on-accent: ui-style == 2 ? (dark ? #381E73 : #FFFFFF)
+        : ui-style == 3 ? (dark ? #161616 : #FFFFFF)
+        : ui-style == 1 ? #F0F0F0
+        : (dark ? #000000 : #FFFFFF);
+    out property <color> accent-soft: ui-style == 1 ? (dark ? #2b3d5c : #e8eefb)
+        : ui-style == 2 ? (dark ? #4F378B : #EADDFF)
+        : ui-style == 3 ? (dark ? #1e3a3e : #cfe8ea)
+        : (dark ? #2f3d52 : #dbe6fb);
+
+    // ---- 风格：控件的底色和描边 ----
+    out property <color> field-bg: ui-style == 1 ? (dark ? #2c2c2e : #ffffff)
+        : ui-style == 2 ? (dark ? #1c1b1f : #ffffff)
+        : ui-style == 3 ? (dark ? #262626 : #c7c7c7)
+        : (dark ? #1e1e1e : #ffffff);
+    out property <color> field-border: ui-style == 1 ? (dark ? #48484a : #c7c7cc)
+        : ui-style == 2 ? (dark ? #938f99 : #79747e)
+        : ui-style == 3 ? (dark ? #3d3d3d : #3d3d3d33)
+        : (dark ? #4f4f4f : #c3c9d1);
+    out property <color> field-hint: ui-style == 1 ? (dark ? #98989d : #8e8e93)
+        : ui-style == 2 ? (dark ? #cac4d0 : #49454e)
+        : ui-style == 3 ? (dark ? #959595 : #585858)
+        : (dark ? #959595 : #667080);
+    out property <color> btn-bg: ui-style == 1 ? (dark ? #636366 : #f2f2f7)
+        : ui-style == 2 ? (dark ? #4A4458 : #E8DEF8)
+        : ui-style == 3 ? (dark ? #262626 : #c7c7c7)
+        : (dark ? #3a3a3a : #f9f9f9);
+    out property <color> btn-fg: ui-style == 1 ? (dark ? #e7e7e7 : #1c1c1e)
+        : ui-style == 2 ? (dark ? #E8DEF8 : #1E192B)
+        : ui-style == 3 ? (dark ? #c4c4c4 : #3d3d3d)
+        : (dark ? #d8d8d8 : #1f2328);
+    out property <color> btn-border: ui-style == 1 ? (dark ? #636366 : #c7c7cc)
+        : ui-style == 3 ? (dark ? #3d3d3d : #3d3d3d33)
+        : (dark ? #4f4f4f : #c3c9d1);
+    out property <color> btn-hover: ui-style == 1 ? (dark ? #7a7a7d : #e7e7e7)
+        : ui-style == 2 ? (dark ? #5a5369 : #ddd3f3)
+        : ui-style == 3 ? (dark ? #363636 : #d4d4d4)
+        : (dark ? #454545 : #e6e9ed);
+    out property <color> btn-pressed: ui-style == 1 ? (dark ? #98989d : #d1d1d6)
+        : ui-style == 2 ? (dark ? #6a627c : #cfc0ee)
+        : ui-style == 3 ? (dark ? #16161680 : #bebebe80)
+        : (dark ? #505050 : #d8dce2);
 
     // 深色照 Houdini：中性灰、面板之间是更深的缝；浅色是同一套结构的亮版
     out property <color> bg: dark ? #1c1c1c : #d5d8dd;            // 面板之间的缝、窗口底色
@@ -134,15 +204,14 @@ export global Theme {
     out property <color> surface-alt: dark ? #262626 : #eef0f3;   // 页签条、状态栏、代码预览
     out property <color> pane-head: dark ? #333333 : #e6e9ed;     // 面板的路径栏、参数面板的节点头
     out property <color> param-bg: dark ? #383838 : #f4f5f7;      // 参数表单底色
-    out property <color> field: dark ? #1e1e1e : #ffffff;         // 输入框、代码框
+    out property <color> field: field-bg;                          // 输入框、代码框（跟风格走）
     out property <color> edge: dark ? #141414 : #b9bec6;          // 面板外框
     out property <color> border: dark ? #3a3a3a : #dde1e6;
     out property <color> border-strong: dark ? #4f4f4f : #c3c9d1;
     out property <color> text: dark ? #d8d8d8 : #1f2328;
     out property <color> text-muted: dark ? #b0b0b0 : #4f5763;
     out property <color> text-faint: dark ? #959595 : #667080;    // 白 / 深灰底上都够 4.5:1
-    out property <color> accent: dark ? #5b9cff : #2563eb;        // 显示标记、选区、链接
-    out property <color> accent-soft: dark ? #2f3d52 : #dbe6fb;
+    // accent / accent-soft / on-accent 在上面（跟界面风格走）：显示标记、选区、链接
     out property <color> focus: dark ? #e8a33d : #c47a12;         // 当前页签、正在编辑的框（Houdini 的橙）
     out property <color> select: dark ? #f2c037 : #b88400;        // 选中的节点
     out property <color> hover: dark ? #3a3a3a : #e6e9ed;
@@ -152,6 +221,9 @@ export global Theme {
     out property <color> row-alt: dark ? #303030 : #f8f9fa;
     out property <color> row-hover: dark ? #363636 : #f0f4fb;
     out property <color> row-sel: dark ? #2f3d52 : #dde8fb;
+    // 查找（Ctrl+F）命中的格子、当前跳到的那一个
+    out property <color> find-hit: dark ? #5a4a12 : #fff0b8;
+    out property <color> find-current: dark ? #d99a2b : #e08b00;
     out property <color> grid: dark ? #3a3a3a : #e6e9ed;
     out property <color> gutter-bg: dark ? #262626 : #f1f3f5;
     out property <color> chip-bg: dark ? #474747 : #e6e9ed;
@@ -159,7 +231,6 @@ export global Theme {
     out property <color> warn: dark ? #e8b923 : #e0a400;          // 旁路标记
     out property <color> on-warn: #2b2000;
     out property <color> shadow: dark ? #00000099 : #0f172a30;
-    out property <color> on-accent: dark ? #10141a : #ffffff;
     // 节点图
     out property <color> canvas: dark ? #373737 : #cdd1d6;
     out property <color> canvas-grid: dark ? #3f3f3f : #c3c7cd;
@@ -217,6 +288,7 @@ export global Icons {
     out property <string> code: "M8.5 7 L3.5 12 L8.5 17 M15.5 7 L20.5 12 L15.5 17";
     out property <string> copy: "M9 9 H19 V19 H9 Z M15 9 V5 H5 V15 H9";
     out property <string> chevron: "M9 6 L15 12 L9 18";
+    out property <string> caret: "M6 9.5 L12 15.5 L18 9.5";   // 下拉框右边的箭头
     out property <string> columns: "M4 5 L20 5 L20 19 L4 19 Z M9.5 5 L9.5 19 M14.5 5 L14.5 19";
     out property <string> fit: "M4 9 V4 H9 M15 4 H20 V9 M20 15 V20 H15 M9 20 H4 V15";
     out property <string> minus: "M5 12 H19";
@@ -225,6 +297,10 @@ export global Icons {
     out property <string> back: "M15 6 L9 12 L15 18";
     out property <string> folder: "M3.5 6.5 A1 1 0 0 1 4.5 5.5 H9.5 L11.5 8 H19.5 A1 1 0 0 1 20.5 9 V17.5 A1 1 0 0 1 19.5 18.5 H4.5 A1 1 0 0 1 3.5 17.5 Z";
     out property <string> filter: "M4 5 H20 L14 12.5 V19 L10 17 V12.5 Z";
+    // 查找浮窗
+    out property <string> search: "M10.5 4 A6.5 6.5 0 1 0 10.5 17 A6.5 6.5 0 1 0 10.5 4 Z M15.5 15.5 L20.5 20.5";
+    out property <string> up: "M12 19 V6 M6.5 11.5 L12 6 L17.5 11.5";
+    out property <string> down: "M12 5 V18 M6.5 12.5 L12 18 L17.5 12.5";
 
     // 节点分类的图标：IO / 行 / 列 / 表达式 / 统计 / 变形 / 多表 / 代码
     pure public function cat(i: int) -> string {

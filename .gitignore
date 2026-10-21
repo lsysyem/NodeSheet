@@ -3,5 +3,6 @@
 drop_test.log
 /dist
 __pycache__/
+/engine/wheels/
 assets/icon-preview.png
 /testdata/big200k.ods

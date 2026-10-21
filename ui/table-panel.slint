@@ -1,8 +1,8 @@
 // 表格面板：页签（表格 / Python 脚本）+ 路径栏（显示的是哪个节点）+ 表头、虚拟化的数据行、行号列；
 // 点 / 拖动选择格子、行、列。纯显示，数据操作都在节点里做。
-import { Button, ListView } from "std-widgets.slint";
+import { ListView } from "std-widgets.slint";
 import { Theme, Icons, ColumnSpec, RowData } from "theme.slint";
-import { PaneTabs, IconButton, CodeEditor } from "widgets.slint";
+import { PaneTabs, IconButton, CodeEditor, Button, LineEdit, ComboBox } from "widgets.slint";
 
 export component TablePanel inherits Rectangle {
     // ---- 状态都在 AppWindow 上（Rust 只和它打交道），这里接进来用
@@ -60,6 +60,136 @@ export component TablePanel inherits Rectangle {
     callback save-script();
     callback show-plan();
     callback copy-plan();
+
+    // 跳到行（Ctrl+G / 查找跳过去）：表格滚到那一行（1 起）。scroll-seq 每跳一次 +1（同一行也能再滚）
+    in property <int> scroll-row: -1;
+    in property <int> scroll-seq: 0;
+    changed scroll-seq => {
+        if (root.scroll-row > 0) {
+            table.want-row = -1;
+            table.want-row = root.scroll-row - 1;
+        }
+    }
+
+    // ---- 查找（Ctrl+F）：命中高亮、跳到哪一条（状态在 Rust，见 view.rs 的 Find）
+    in property <bool> find-open;
+    in property <string> find-text;
+    in property <string> find-count;      // “3 / 128” / “没有找到”
+    in property <int> find-current;
+    in property <int> find-epoch;         // 命中变了（Rust +1），高亮跟着重算
+    in property <int> find-row;           // 当前跳到哪一行（-1 = 没有），表格滚过去
+    in property <int> find-col;           // 哪一列（画个框）
+    in property <float> find-col-x;       // 命中列的左边缘（不含 gutter，Rust 按列宽算好）
+    in property <float> find-col-w;       // 命中列的宽
+    // 查找范围：-1 = 全表；否则列下标。项是“全表” + 各列名
+    in property <int> find-scope: -1;
+    in property <[string]> find-scope-names;
+    // 跳到当前命中：不在视口里才滚（最小滚动），上下留 3 行、左右留 60px 上下文
+    function reveal-hit() {
+        if (root.find-row < 0) {
+            return;
+        }
+        // 纵向：命中行在视口外才滚（视口顶行 = round(-content-y / row-h)）
+        if (root.find-row < max(0, round(-table.content-y / root.row-h))
+            || root.find-row >= max(0, round(-table.content-y / root.row-h))
+                + max(1, floor((root.height - 54px) / root.row-h))) {
+            table.content-y = -max(0px, (root.find-row - 3) * root.row-h);
+        }
+        // 横向：左侧 = -content-x，右边界 = 左 + 可视宽
+        if (root.find-col-x * 1px < max(0px, -table.content-x)) {
+            table.content-x = -max(0px, root.find-col-x * 1px - 60px);
+        } else if ((root.find-col-x + root.find-col-w) * 1px
+            > max(0px, -table.content-x) + root.width - root.gutter-width - 12px) {
+            table.content-x = -max(0px,
+                (root.find-col-x + root.find-col-w) * 1px - (root.width - root.gutter-width - 12px) + 60px);
+        }
+    }
+    changed find-col => { reveal-hit(); }
+    changed find-row => { reveal-hit(); }
+
+    // 查找开着时，表格里改成选某一整列（或不再选列），范围跟着走。
+    // 只在查找浮窗开着时同步，免得平时点格子也去改查找状态。
+    // 用短定时器延后判断：select-col 会依次改 sel-c0 / sel-c1 / sel-cols，
+    // 中间那一下 sel-cols 还是旧值，直接判会误报“全表”。
+    find-scope-t := Timer {
+        interval: 30ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            if (!root.find-open) {
+                return;
+            }
+            if (root.sel-active && root.sel-cols && !root.sel-rows && root.sel-c0 == root.sel-c1) {
+                root.find-scope-picked(root.sel-c0);
+            } else if (root.sel-active && (root.sel-rows || !root.sel-cols)) {
+                // 选成格子 / 整行 / 多列：回到全表
+                root.find-scope-picked(-1);
+            }
+        }
+    }
+    changed sel-active => { if (root.find-open) { find-scope-t.running = true; } }
+    changed sel-cols => { if (root.find-open) { find-scope-t.running = true; } }
+    changed sel-rows => { if (root.find-open) { find-scope-t.running = true; } }
+    changed sel-c0 => { if (root.find-open) { find-scope-t.running = true; } }
+    changed sel-c1 => { if (root.find-open) { find-scope-t.running = true; } }
+    pure callback find-hit-cell(int, int) -> bool;
+    callback find-changed(string, bool, int);  // 文字、忽略大小写、范围（-1 = 全表）
+    callback find-scope-changed(int);          // 范围下拉换了
+    callback find-scope-picked(int);           // 表格里选了一整列（-1 = 不是单列）：查找范围跟着走
+    callback find-step(int);
+    callback find-close();
+    callback find-debounced();            // 输入去抖 250ms 到时：真正开始扫描
+    // Esc（焦点不在输入框时）从 AppWindow 的 key-scope 置位这个标志：起滑出动画关闭（见 changed）
+    in-out property <bool> find-close-asked: false;
+
+    // 查找浮窗的动画 / 去抖 / 开关标志（浮窗是 if root.find-open 里的临时块，控制量放这里才能跨块访问）
+    property <float> find-slide: 0;        // 滑出进度：0 = 在位，1 = 完全滑出
+    property <bool> find-close-now: false; // 动画放完这一刻为真：摘掉浮窗
+    property <bool> find-debounce-armed: false; // 去抖定时器到点时该不该触发扫描
+    property <bool> find-ic: true;         // 忽略大小写（默认开：找文字多半想大小写不敏感）
+    // 浮窗位置：默认贴在表格面板右上角；拖过之后就停在拖到的位置（-1 = 还没拖过，用默认）
+    property <length> find-x: -1px;
+    property <length> find-y: -1px;
+    // 正在拖浮窗：记录按下时把手中心相对浮窗左上角的偏移
+    property <length> find-drag-dx: 0px;
+    property <length> find-drag-dy: 0px;
+    // 浮窗实际宽度（init 时量出；拖拽边界和位置换算都用它，免得引用布局里的宽）
+    property <length> find-w: 400px;
+
+    // 这一格是不是命中了（查找的黄色底）；读 find-epoch 建依赖，命中变了要重算
+    pure function find-hit(r: int, c: int) -> bool {
+        return root.find-open && root.find-epoch >= 0 && root.find-hit-cell(r, c);
+    }
+    pure function is-current-hit(r: int, c: int) -> bool {
+        return root.find-open && root.find-row == r && root.find-col == c;
+    }
+
+    // 浮窗左上角：没拖过用默认（右上角）；拖过用记下的位置，夹在面板里
+    pure function find-pos-x(w: length) -> length {
+        return root.find-x < 0px ? max(0px, root.width - w - 12px)
+            : max(0px, min(root.width - w, root.find-x));
+    }
+    pure function find-pos-y(h: length) -> length {
+        return root.find-y < 0px ? 60px
+            : max(0px, min(root.height - h, root.find-y));
+    }
+
+    // 带滑出渐隐地关掉查找浮窗（Esc / ×）：动画放完才真正摘掉并聚焦回表格
+    function start-find-close() {
+        root.find-close-now = true;
+        find-slide-t.running = true;
+    }
+    // Esc（全局 key-scope / 输入框里）和 × 都翻转 AppWindow 的 find-close-asked：这里起同一滑出动画。
+    // 翻转是为了每次都触发 changed；用完在关闭收尾时复位。
+    changed find-close-asked => {
+        if (root.find-open && !root.find-close-now) {
+            start-find-close();
+        }
+    }
+
+    // 行高：设置里选的三档（紧凑 / 标准 / 宽松）
+    in property <bool> row-h-compact;
+    in property <bool> row-h-loose;
 
     pure function between(v: int, a: int, b: int) -> bool {
         return v >= min(a, b) && v <= max(a, b);
@@ -276,6 +406,41 @@ export component TablePanel inherits Rectangle {
         Rectangle { y: parent.height - 1px; height: 1px; background: Theme.edge; }
     }
 
+    // 查找浮窗打开后聚焦输入框（保留：init 直接聚焦，这个 Timer 备用）
+    // 输入去抖：停顿 250ms 才真正扫（大表上每个 keystroke 都扫会卡）。
+    // 一次性定时器：打字重设，停够时间到点才触发。
+    find-debounce-t := Timer {
+        interval: 250ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            if (root.find-debounce-armed) {
+                root.find-debounce-armed = false;
+                root.find-debounced();
+            }
+        }
+    }
+    // 滑出关闭动画：每 16ms 前进一帧，放掉调 find-close 真正关掉、聚焦回表格
+    find-slide-t := Timer {
+        interval: 16ms;
+        running: false;
+        triggered => {
+            if (root.find-slide < 1) {
+                root.find-slide = min(1, root.find-slide + 0.13);
+            } else {
+                self.running = false;
+                root.find-slide = 0;
+                if (root.find-close-now) {
+                    root.find-close-now = false;
+                    root.find-close();
+                    root.focus-table();   // 焦点还给表格，滚轮 / 方向键接着能用
+                }
+                root.find-close-asked = false;   // 复位，下次 Esc / × 翻转才能再触发
+            }
+        }
+    }
+
+
     // Python 脚本页：只看不改，带语法高亮
     if root.view-tab == 1: CodeEditor {
         x: 6px;
@@ -466,6 +631,14 @@ export component TablePanel inherits Rectangle {
             min-width: 0px;
             max-width: 999999px;
 
+            // 跳到行（Ctrl+G / 查找跳过去）：行高一样时直接按比例算，滚到那一行附近（留出几行上下文）
+            property <int> want-row: -1;
+            changed want-row => {
+                if (self.want-row >= 0) {
+                    table.content-y = -max(0px, (self.want-row - 4) * root.row-h);
+                }
+            }
+
             for row[idx] in root.rows: Rectangle {
                 height: root.settings-wrap ? max(root.row-h, cells.min-height) : root.row-h;
                 // 宽度必须显式给全：编译器默认把行宽绑到视口宽（flickable.width），
@@ -513,7 +686,9 @@ export component TablePanel inherits Rectangle {
                         min-width: root.columns[i].width;
                         max-width: root.columns[i].width;
                         clip: true;
-                        background: root.cell-selected(idx, i) ? Theme.row-sel : transparent;
+                        background: root.is-current-hit(idx, i) ? Theme.find-current
+                            : root.find-hit(idx, i) ? Theme.find-hit
+                            : (root.cell-selected(idx, i) ? Theme.row-sel : transparent);
                         min-height: root.settings-wrap ? (cell-txt.preferred-height + 6px) : 0px;
 
                         cell-txt := Text {
@@ -730,4 +905,261 @@ export component TablePanel inherits Rectangle {
             }
         }
     }
+
+    // 查找浮窗（Ctrl+F）：浮在表格面板右上角，左侧把手可以拖开；Esc / × 关闭（带滑出渐隐动画）。
+    // 一行工具条：搜索图标 + 输入框 + 计数 + 上一个 / 下一个 + Aa + 关闭。
+    if root.find-open: Rectangle {
+        x: root.find-pos-x(self.width);
+        y: root.find-pos-y(self.height) - (root.find-slide * 12px);
+        width: min(parent.width - 24px, 430px);
+        height: 36px;
+
+        // 打开：聚焦输入框；有上次的搜索词就全选，直接打字覆盖成新词；量出实际宽度供拖拽换算
+        init => {
+            root.find-slide = 0;
+            root.find-w = self.width;
+            find-input.focus();
+            if (root.find-text != "") {
+                find-input.select-all();
+            }
+        }
+
+        background: Theme.surface;
+        border-width: 1px;
+        border-color: Theme.border-strong;
+        border-radius: 7px;
+        clip: true;   // 内容万一放不下也不画到边框外
+        // 轻微的浮起感：底下垫一层淡影
+        drop-shadow-blur: 10px;
+        drop-shadow-color: Theme.shadow;
+        drop-shadow-offset-y: 2px;
+        opacity: 1 - root.find-slide;
+
+        // 一行工具条：每个控件统一 26px 高，都各自包一层 VerticalLayout 垂直居中
+        HorizontalLayout {
+            padding-left: 4px;
+            padding-right: 8px;
+            spacing: 2px;
+
+            // 拖拽把手：两列小点，按住拖开（位置记到 find-x / find-y）
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 16px;
+                    height: 26px;
+                    grip-ta := TouchArea {
+                        mouse-cursor: move;
+                        pointer-event(e) => {
+                            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                                root.find-x = root.find-pos-x(root.find-w);
+                                root.find-y = root.find-pos-y(34px);
+                                root.find-drag-dx = self.absolute-position.x + self.mouse-x - root.find-x;
+                                root.find-drag-dy = self.absolute-position.y + self.mouse-y - root.find-y;
+                            }
+                        }
+                        moved => {
+                            if (self.pressed) {
+                                root.find-x = max(0px, min(root.width - root.find-w,
+                                    self.absolute-position.x + self.mouse-x - root.find-drag-dx));
+                                root.find-y = max(0px, min(root.height - 34px,
+                                    self.absolute-position.y + self.mouse-y - root.find-drag-dy));
+                            }
+                        }
+                    }
+                    // 六个点：两列三行
+                    for dot[i] in [0, 1, 2, 3, 4, 5]: Rectangle {
+                        x: 4px + mod(i, 2) * 5px;
+                        y: 5px + floor(i / 2) * 6px;
+                        width: 3px;
+                        height: 3px;
+                        border-radius: 1.5px;
+                        background: Theme.text-faint;
+                    }
+                }
+            }
+
+            // 放大镜图标
+            VerticalLayout {
+                alignment: center;
+                padding-left: 4px;
+                padding-right: 6px;
+                Path {
+                    width: 15px;
+                    height: 15px;
+                    viewbox-width: 24;
+                    viewbox-height: 24;
+                    commands: Icons.search;
+                    stroke: Theme.text-faint;
+                    stroke-width: 2px;
+                    stroke-line-cap: round;
+                    fill: transparent;
+                }
+            }
+
+            // 查找范围：全表 / 某一列（下拉项由 Rust 按当前表推过来，第 0 项是“全表”）
+            VerticalLayout {
+                alignment: center;
+                find-scope-box := ComboBox {
+                    height: 26px;
+                    width: 116px;
+                    model: root.find-scope-names;
+                    current-index: root.find-scope + 1;
+                    // 选中的项是“全表”就 -1，否则是列下标（项的顺序 = 全表 + 各列）
+                    selected(v) => {
+                        root.find-scope-changed(v == "全表" ? -1 : find-scope-box.current-index - 1);
+                    }
+                }
+            }
+
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 1;
+
+                find-input := LineEdit {
+                    seamless: true;
+                    height: 26px;
+                    min-width: 56px;
+                    placeholder-text: "在表里查找…";
+                    text: root.find-text;
+                    edited(t) => {
+                        root.find-changed(t, root.find-ic, root.find-scope);
+                        root.find-debounce-armed = true;
+                        find-debounce-t.running = true;
+                    }
+                    accepted(t) => {
+                        find-debounce-t.running = false;
+                        root.find-debounce-armed = false;
+                        root.find-step(1);
+                    }
+                    key-pressed(e) => {
+                        if (e.text == Key.Escape) {
+                            root.find-close-asked = !root.find-close-asked;
+                            return accept;
+                        }
+                        // 查找框里 Shift+回车：跳到上一个（Tab 式）
+                        if (e.text == Key.Return && e.modifiers.shift) {
+                            root.find-step(-1);
+                            return accept;
+                        }
+                        return reject;
+                    }
+                }
+            }
+
+            // 计数：小字；两边各垫一点空隙
+            Rectangle { width: 2px; }
+            VerticalLayout {
+                alignment: center;
+                Text {
+                    text: root.find-count;
+                    color: root.find-count == "没有找到" ? Theme.danger : Theme.text-faint;
+                    font-size: 11.5px;
+                    vertical-alignment: center;
+                }
+            }
+            Rectangle { width: 2px; }
+
+            // 上一个 / 下一个（图标按钮）
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 26px;
+                    height: 26px;
+                    border-radius: 4px;
+                    background: prev-ta.has-hover ? Theme.hover : transparent;
+                    prev-ta := TouchArea { mouse-cursor: pointer; clicked => { root.find-step(-1); } }
+                    VerticalLayout {
+                        alignment: center;
+                        Path {
+                            width: 14px; height: 14px;
+                            viewbox-width: 24; viewbox-height: 24;
+                            commands: Icons.up;
+                            stroke: prev-ta.has-hover ? Theme.text : Theme.text-muted;
+                            stroke-width: 2px;
+                            stroke-line-cap: round;
+                            fill: transparent;
+                        }
+                    }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 26px;
+                    height: 26px;
+                    border-radius: 4px;
+                    background: next-ta.has-hover ? Theme.hover : transparent;
+                    next-ta := TouchArea { mouse-cursor: pointer; clicked => { root.find-step(1); } }
+                    VerticalLayout {
+                        alignment: center;
+                        Path {
+                            width: 14px; height: 14px;
+                            viewbox-width: 24; viewbox-height: 24;
+                            commands: Icons.down;
+                            stroke: next-ta.has-hover ? Theme.text : Theme.text-muted;
+                            stroke-width: 2px;
+                            stroke-line-cap: round;
+                            fill: transparent;
+                        }
+                    }
+                }
+            }
+
+            // 忽略大小写：小切换按钮（选中时 accent 底）
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 28px;
+                    height: 26px;
+                    border-radius: 4px;
+                    background: root.find-ic ? Theme.accent-soft : (ic-ta.has-hover ? Theme.hover : transparent);
+                    ic-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.find-ic = !root.find-ic;
+                            root.find-changed(root.find-text, root.find-ic, root.find-scope);
+                            root.find-debounce-armed = true;
+                            find-debounce-t.running = true;
+                        }
+                    }
+                    Text {
+                        text: "Aa";
+                        color: root.find-ic ? Theme.accent : Theme.text-muted;
+                        font-size: 11.5px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // 关闭
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 26px;
+                    height: 26px;
+                    border-radius: 4px;
+                    background: close-ta.has-hover ? Theme.hover : transparent;
+                    close-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.find-close-asked = !root.find-close-asked; }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Path {
+                            width: 13px; height: 13px;
+                            viewbox-width: 24; viewbox-height: 24;
+                            commands: Icons.close;
+                            stroke: close-ta.has-hover ? Theme.text : Theme.text-muted;
+                            stroke-width: 2px;
+                            stroke-line-cap: round;
+                            fill: transparent;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
 }

@@ -1,6 +1,276 @@
-// 小组件：按钮、浮层卡片、菜单行、代码编辑框。
-import { ScrollView } from "std-widgets.slint";
-import { Theme, CodeEdit } from "theme.slint";
+// 小组件：按钮、输入框、下拉框、浮层卡片、菜单行、代码编辑框。
+// Button / LineEdit / ComboBox 是自己画的（不用 std-widgets）：界面风格在设置里可以换
+// （Theme.ui-style：Fluent / Cupertino / Material / Cosmic），控件的样子跟它走；
+// ListView / ScrollView 的滚动条还是 slint 编译时那个风格，换不了。
+import { ScrollView, ListView } from "std-widgets.slint";
+import { Theme, Icons, CodeEdit } from "theme.slint";
+
+// 按钮：fluent 是浅底描边、cupertino 是扁平、material 和 cosmic 是胶囊填充
+export component Button inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    property <color> tint: Theme.dark ? #ffffff : #000000;
+
+    height: Theme.btn-h;
+    min-width: btn-txt.preferred-width + Theme.btn-pad * 2;
+    horizontal-stretch: 0;
+    border-radius: Theme.btn-radius;
+    background: root.primary ? Theme.accent-bg : Theme.btn-bg;
+    border-width: root.primary ? 0 : Theme.btn-border-w;
+    border-color: Theme.btn-border;
+    opacity: root.enabled ? 1 : 0.5;
+
+    // 按下 / 悬停：叠一层深浅色（照 material / cosmic 的 state layer）
+    Rectangle {
+        border-radius: parent.border-radius;
+        background: root.tint;
+        opacity: !ta.has-hover ? 0 : (ta.pressed ? 0.22 : 0.10);
+    }
+
+    btn-txt := Text {
+        text: root.text;
+        color: root.primary ? Theme.on-accent : Theme.btn-fg;
+        font-size: Theme.field-font;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        enabled: root.enabled;
+        clicked => {
+            if (root.enabled) {
+                root.clicked();
+            }
+        }
+    }
+}
+
+// 单行输入框：焦点的画法跟风格走（fluent 底线 / cupertino、cosmic 外圈 / material 加粗边框）
+export component LineEdit inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    in property <string> placeholder-text;
+    in property <bool> read-only <=> input.read-only;
+    in property <bool> enabled <=> input.enabled;
+    // 嵌进浮窗 / 工具条里用：不要边框和底色，只有文字和光标（查找浮窗那种一行工具条）
+    in property <bool> seamless;
+    out property <bool> has-focus: input.has-focus;
+    callback accepted(string);
+    callback edited(string);
+    callback key-pressed(event: KeyEvent) -> EventResult;
+    callback key-released(event: KeyEvent) -> EventResult;
+
+    // 选中框里的全部文字（查找框重开时全选上次的搜索词用）
+    public function select-all() {
+        input.select-all();
+    }
+
+    // focus() 用元素自带的：forward-focus 指到输入框，外面调 .focus() 就聚到文字上
+
+    property <bool> on: input.has-focus && root.enabled && !root.read-only;
+
+    min-width: 1px;
+    height: Theme.ctrl-h;
+    forward-focus: input;
+    border-radius: Theme.field-radius;
+    background: root.seamless ? transparent : Theme.field-bg;
+    opacity: root.enabled ? 1 : 0.55;
+    border-width: root.seamless ? 0px : (Theme.field-focus == 3 && root.on ? 2px : 1px);
+    border-color: root.on && !root.seamless ? Theme.accent : Theme.field-border;
+
+    // fluent：底部一道 2px 的横线
+    if Theme.field-focus == 1 && root.on && !root.seamless: Rectangle {
+        x: Theme.field-radius;
+        y: parent.height - 2px;
+        width: parent.width - 2 * Theme.field-radius;
+        height: 2px;
+        border-radius: 1px;
+        background: Theme.accent;
+    }
+    // cupertino / cosmic：外面一圈焦点环
+    if (Theme.field-focus == 2 || Theme.field-focus == 4) && root.on && !root.seamless: Rectangle {
+        x: -2px;
+        y: -2px;
+        width: parent.width + 4px;
+        height: parent.height + 4px;
+        border-radius: Theme.field-radius + 2px;
+        border-width: 1px;
+        border-color: Theme.accent;
+    }
+
+    // 文字的可见范围（长内容跟着光标滚）
+    clipper := Rectangle {
+        x: root.seamless ? 2px : Theme.field-pad;
+        y: 0;
+        width: parent.width - 2 * (root.seamless ? 2px : Theme.field-pad);
+        height: parent.height;
+        clip: true;
+
+        placeholder := Text {
+            visible: root.text == "" && input.preedit-text == "";
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: parent.height;
+            text: root.placeholder-text;
+            color: Theme.field-hint;
+            font-size: Theme.field-font;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        input := TextInput {
+            property <length> ox;
+            x: min(0px, max(parent.width - self.width, self.ox));
+            width: max(parent.width, self.preferred-width);
+            height: parent.height;
+            single-line: true;
+            vertical-alignment: center;
+            color: Theme.text;
+            font-size: Theme.field-font;
+            selection-background-color: Theme.accent-soft;
+            selection-foreground-color: Theme.text;
+
+            accepted => { root.accepted(self.text); }
+            edited => { root.edited(self.text); }
+            key-pressed(e) => { root.key-pressed(e); }
+            key-released(e) => { root.key-released(e); }
+
+            cursor-position-changed(cpos) => {
+                if (cpos.x + self.ox < 0px) {
+                    self.ox = -cpos.x + 12px;
+                } else if (cpos.x + self.ox > clipper.width) {
+                    self.ox = clipper.width - cpos.x - 12px;
+                }
+            }
+        }
+    }
+}
+
+// 下拉框：点开一张浮层列表（PopupWindow 不受面板裁剪）
+export component ComboBox inherits Rectangle {
+    in property <[string]> model;
+    in property <bool> enabled: true;
+    in-out property <int> current-index: 0;
+    in-out property <string> current-value;
+    out property <bool> has-focus: false;
+    callback selected(string);
+
+    property <length> row-h: 26px;
+
+    function sync() {
+        root.current-value = root.current-index >= 0 && root.current-index < root.model.length
+            ? root.model[root.current-index] : "";
+    }
+
+    function pick(i: int) {
+        if (!root.enabled || i < 0 || i >= root.model.length) {
+            return;
+        }
+        root.current-index = i;
+        root.sync();
+        popup.close();
+        root.selected(root.current-value);
+    }
+
+    init => { root.sync(); }
+    changed current-index => { root.sync(); }
+    changed model => { root.sync(); }
+
+    min-width: 1px;
+    height: Theme.ctrl-h;
+    border-radius: Theme.field-radius;
+    background: Theme.field-bg;
+    opacity: root.enabled ? 1 : 0.55;
+    border-width: Theme.field-focus == 3 && ta.has-hover ? 2px : 1px;
+    border-color: ta.has-hover ? Theme.accent : Theme.field-border;
+
+    Text {
+        x: Theme.field-pad;
+        width: parent.width - Theme.field-pad * 2 - 18px;
+        height: parent.height;
+        text: root.current-value;
+        color: Theme.text;
+        font-size: Theme.field-font;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    Path {
+        x: parent.width - Theme.field-pad - 12px;
+        y: (parent.height - 12px) / 2;
+        width: 12px;
+        height: 12px;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: Icons.caret;
+        stroke: Theme.text-muted;
+        stroke-width: 2px;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+        fill: transparent;
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        enabled: root.enabled;
+        clicked => {
+            if (root.enabled) {
+                popup.show();
+            }
+        }
+    }
+
+    popup := PopupWindow {
+        x: 0;
+        y: root.height + 2px;
+        width: max(root.width, 120px);
+        height: min(root.model.length * root.row-h + 8px, 280px);
+
+        Rectangle {
+            background: Theme.surface;
+            border-radius: Theme.card-radius;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+            drop-shadow-blur: 12px;
+            drop-shadow-offset-y: 3px;
+            drop-shadow-color: Theme.shadow;
+        }
+
+        ListView {
+            x: 4px;
+            y: 4px;
+            width: parent.width - 8px;
+            height: parent.height - 8px;
+
+            for t[i] in root.model: Rectangle {
+                height: root.row-h;
+                border-radius: Theme.field-radius;
+                background: i == root.current-index ? Theme.accent-soft
+                    : (item-ta.has-hover ? Theme.hover : transparent);
+
+                Text {
+                    x: Theme.field-pad;
+                    width: parent.width - Theme.field-pad * 2;
+                    height: parent.height;
+                    text: t;
+                    color: Theme.text;
+                    font-size: Theme.field-font;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                item-ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.pick(i); }
+                }
+            }
+        }
+    }
+}
 
 // 工具栏幽灵按钮：图标 + 文字，active 为开启态高亮
 export component IconButton inherits Rectangle {
@@ -139,7 +409,7 @@ export component CheckBox inherits Rectangle {
                 height: 16px;
                 border-radius: 3px;
                 border-width: 1px;
-                border-color: ta.has-hover ? Theme.focus : Theme.border-strong;
+                border-color: root.checked ? Theme.accent : (ta.has-hover ? Theme.accent : Theme.border-strong);
                 background: Theme.field;
                 if root.checked: Path {
                     width: 12px;
@@ -147,7 +417,7 @@ export component CheckBox inherits Rectangle {
                     viewbox-width: 24;
                     viewbox-height: 24;
                     commands: "M5 12.5 L10 17.5 L19 7";
-                    stroke: Theme.focus;
+                    stroke: Theme.accent;
                     stroke-width: 3.2px;
                     stroke-line-cap: round;
                     stroke-line-join: round;
@@ -203,7 +473,7 @@ export component Card inherits Rectangle {
     background: Theme.surface;
     border-width: 1px;
     border-color: Theme.border-strong;
-    border-radius: 10px;
+    border-radius: Theme.card-radius;
     drop-shadow-blur: 18px;
     drop-shadow-offset-y: 4px;
     drop-shadow-color: Theme.shadow;
@@ -244,7 +514,7 @@ export component CodeEditor inherits Rectangle {
     forward-focus: input;
     border-radius: 3px;
     border-width: 1px;
-    border-color: input.has-focus && !root.read-only ? Theme.focus : Theme.border-strong;
+    border-color: input.has-focus && !root.read-only ? Theme.accent : Theme.border-strong;
     background: Theme.field;
 
     sv := ScrollView {

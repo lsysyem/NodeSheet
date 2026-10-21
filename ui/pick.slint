@@ -2,9 +2,9 @@
 // + 选择器条件（polars 的全部 cs.*，条与条之间或 / 且 / 去掉 / 异或，每条可以取反）
 // + 写法和“现在会选到哪几列”（引擎算的）。状态全在 Rust，这里只画、只报。
 
-import { LineEdit, ComboBox, ListView, ScrollView, Button } from "std-widgets.slint";
+import { ListView, ScrollView } from "std-widgets.slint";
 import { Theme, Icons } from "theme.slint";
-import { Card, CheckBox, IconButton } from "widgets.slint";
+import { Card, CheckBox, IconButton, LineEdit, ComboBox, Button } from "widgets.slint";
 
 export struct PickCol {
     name: string,

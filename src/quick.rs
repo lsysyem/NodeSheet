@@ -4,6 +4,7 @@
 use crate::*;
 use graph::{Env, Graph};
 use nodes::py_str;
+use serde_json::json;
 
 /// 右键菜单的一项被点了。action：sort-asc / sort-desc / count / drop / keep / only / remove；
 /// row：右键点的那一行（表头是 -1），col：那一列。
@@ -237,7 +238,93 @@ fn filter(g: &mut Graph, column: &str, test: &Test, remove: bool) -> Result<u32,
     Ok(id)
 }
 
-/// 引擎测试用：在 base 后面各建一个快捷操作的节点，返回 (说明, 节点)。
+/// 右键菜单的“筛选这列…”：在显示的节点后面接一个 filter 节点，条件先填“这一列 = 这一格的值”，
+/// 选中它并打开条件编辑器（用户接着改操作和值）。表头上（row < 0）时条件只有列、值和操作留空。
+pub(crate) fn filter_this_column(weak: &slint::Weak<AppWindow>, state: &Arc<Mutex<App>>, row: i32, col: i32) {
+    let Some(app) = weak.upgrade() else { return };
+    {
+        let mut st = state.lock().unwrap();
+        if !st.shown_sub.is_empty() {
+            app.set_status(SharedString::from(
+                "表格里是表达式网络里某个节点的值：点画布空白处回到整个节点的结果再用",
+            ));
+            return;
+        }
+        let Some(base) = (st.shown.or_else(|| st.graph.primary().map(|n| n.id)))
+            .filter(|id| st.graph.node(*id).is_some())
+        else {
+            app.set_status(SharedString::from("还没有打开文件"));
+            return;
+        };
+        let Some(source) = st.sheets.get(st.current).map(|s| s.source.clone()) else {
+            app.set_status(SharedString::from("表格是空的"));
+            return;
+        };
+        let headers = source.headers().to_vec();
+        let Ok(col) = usize::try_from(col) else { return };
+        let Some(column) = headers.get(col).cloned() else { return };
+        let dtype = column_types(&st, &*source).get(col).cloned().unwrap_or_default();
+        // 这一格的值（表头上没有）：按列的类型挑一种比较（数字 / 日期 / 文字…），挑不出来就只填列
+        let value = match usize::try_from(row).ok().map(|r| source.window(r, 1)) {
+            Some(rows) => rows.first().and_then(|r| r.get(col)).cloned(),
+            None => None,
+        };
+        // 先回到表格级：新节点建在显示的节点后面
+        st.inside.clear();
+        st.graph.select_only(Some(base));
+        match filter_this(&mut st.graph, &column, &dtype, value.as_deref()) {
+            Ok(id) => {
+                push_kinds(&app, &mut st);
+                // 参数面板上点“编辑”走的是同一个入口：选中节点、参数是筛选条件那个
+                st.graph.select_only(Some(id));
+                let param = st.graph.node(id).and_then(|n| n.kind.params.iter().position(|p| p.name == "conditions"));
+                push_graph(&app, &st, true);
+                drop(st);
+                graph_changed(weak, state, true);
+                if let Some(param) = param {
+                    // 条件编辑器（cond.rs）对“选中的节点”打开：刚选中的就是这个 filter
+                    cond::open(weak, state, param);
+                }
+            }
+            Err(msg) => app.set_status(SharedString::from(msg)),
+        }
+    }
+}
+
+/// 在 base 后面接一个 filter 节点，条件树先放一条“这一列 = 这一格的值”（表头上没有值时是“为空”）。
+/// 打开条件编辑器后用户接着改操作（包含 / 大于 / 介于…）和值。
+fn filter_this(g: &mut Graph, column: &str, dtype: &str, value: Option<&str>) -> Result<u32, String> {
+    let kind = nodes::find("filter").ok_or("没有 filter 节点")?;
+    let id = g.add(&kind);
+    // 条件树（cond.rs 的 JSON），值按列的类型写
+    let raw = value.map(|v| v.trim()).filter(|v| !v.is_empty()).unwrap_or("");
+    let item = if raw.is_empty() {
+        json!({ "col": column, "op": "is_null" })
+    } else {
+        // 值的类型跟着列走：数字 / 日期 / 时间 / 日期时间 / 真假 / 文字
+        let base = dtype.split(['[', '{']).next().unwrap_or("");
+        let vtype = match base {
+            b if b.starts_with('i') || b.starts_with('u') || b.starts_with('f') || b == "decimal" => "number",
+            "date" => "date",
+            "time" => "time",
+            "datetime" if !dtype.contains(',') => "datetime",
+            "bool" => "bool",
+            _ => "text",
+        };
+        let mut item = json!({ "col": column, "op": "eq", "value": raw });
+        if vtype != "text" {
+            item["type"] = json!(vtype);
+        }
+        item
+    };
+    let tree = json!({ "join": "and", "items": [item] });
+    if let Some(node) = g.node_mut(id) {
+        node.set("conditions", &tree.to_string());
+    }
+    let _ = g.rename(id, &format!("筛选_{column}"));
+    Ok(id)
+}
+
 #[cfg(test)]
 pub(crate) fn every_action(g: &mut Graph, base: u32) -> Vec<(&'static str, u32)> {
     type Build = fn(&mut Graph) -> Result<u32, String>;
@@ -314,5 +401,33 @@ mod tests {
         g.select_only(Some(1));
         let s = select(&mut g, &["姓名", "城市"], true).unwrap();
         assert_eq!((g.node(s).unwrap().value("mode"), g.node(s).unwrap().value("columns")), ("drop", "\"姓名\", \"城市\""));
+    }
+
+    /// “筛选这列…”：建好的 filter 节点条件树里是这一列和这一格的值（值按列的类型写）。
+    #[test]
+    fn filter_this_column_builds_conditions() {
+        let mut g = graph();
+        g.select_only(Some(1));
+        let id = filter_this(&mut g, "城市", "str", Some("北京")).unwrap();
+        let node = g.node(id).unwrap();
+        let cond = crate::cond::parse(&node.value("conditions")).unwrap();
+        assert_eq!(cond.items.len(), 1);
+        match &cond.items[0] {
+            crate::cond::Item::Test(t) => assert_eq!((t.col.as_str(), t.op.as_str(), t.value.as_str()), ("城市", "eq", "北京")),
+            _ => panic!("应该是一个条件"),
+        }
+        // 数字列：值是数字、类型写 number；表头（没有值）时是“为空”
+        let id = filter_this(&mut g, "年龄", "i64", Some("30")).unwrap();
+        let cond = crate::cond::parse(&g.node(id).unwrap().value("conditions")).unwrap();
+        match &cond.items[0] {
+            crate::cond::Item::Test(t) => assert_eq!((t.vtype.as_str(), t.value.as_str()), ("number", "30")),
+            _ => panic!("应该是一个条件"),
+        }
+        let id = filter_this(&mut g, "城市", "str", None).unwrap();
+        let cond = crate::cond::parse(&g.node(id).unwrap().value("conditions")).unwrap();
+        match &cond.items[0] {
+            crate::cond::Item::Test(t) => assert_eq!(t.op, "is_null"),
+            _ => panic!("应该是一个条件"),
+        }
     }
 }

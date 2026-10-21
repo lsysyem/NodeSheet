@@ -11,6 +11,45 @@ pub(crate) const ROW_BLOCK: usize = if cfg!(test) { 32 } else { 64 };
 /// 工程文件的扩展名：节点图 + 界面布局（像 Houdini 的 hip）。
 pub(crate) const PROJECT_EXT: &str = "rtv";
 
+/// 表格里的查找（Ctrl+F / 菜单“查找”）：当前的结果和跳到哪一条。
+#[derive(Default)]
+pub(crate) struct Find {
+    /// 找的文字（空 = 没在找）
+    pub(crate) text: String,
+    /// 命中的格子（按行、列升序），和每一格命中的位置
+    pub(crate) hits: Vec<(usize, usize)>,
+    /// 当前跳到第几个命中（hits 的下标，-1 = 还没跳）
+    pub(crate) current: i32,
+    /// 查找条开着
+    pub(crate) open: bool,
+    /// 已经扫到第几行：往下接着扫，避免每次输入都从头扫
+    pub(crate) scanned: usize,
+    /// 表的总行数 / 列数（扫的时候记下来，扫完了用来停）
+    pub(crate) n_rows: usize,
+    pub(crate) n_cols: usize,
+    /// 正在后台扫（同一时刻只跑一个）
+    pub(crate) running: bool,
+    /// 这次查找的编号：结果回来时对不上就丢掉（又改了查找的文字）
+    pub(crate) ticket: u64,
+    /// 扫完了一遍（再按回车从头找）
+    pub(crate) done: bool,
+    /// 比较时忽略大小写
+    pub(crate) ignore_case: bool,
+    /// 上一次在查找框里看到的文字（“输入停顿 250ms 才真正扫描”的去抖：保存这次改了什么）
+    pub(crate) pending_text: String,
+    /// 去抖定时器到时（ms 时刻）；到了才真正开始扫
+    pub(crate) debounce_at: Option<std::time::Instant>,
+    /// 正在等的去抖定时器是不是开着（界面用 Timer，这里记状态避免重入）
+    pub(crate) debouncing: bool,
+    /// 只在某一列里找（None = 全表）。界面上的“范围”下拉选的
+    pub(crate) column: Option<usize>,
+}
+
+/// 一次查找最多扫多少行再回界面（1000 行以内不会卡）。
+const FIND_BATCH: usize = 1000;
+/// 输入去抖：停顿这么久才真正开始扫（大表上每个 keystroke 都扫会卡）。
+const FIND_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
+
 pub(crate) fn clear_table(app: &AppWindow) {
     app.set_rows(ModelRc::new(VecModel::from(Vec::new())));
     app.set_columns(ModelRc::new(VecModel::from(Vec::new())));
@@ -208,6 +247,288 @@ pub(crate) fn update_column_types(app: &AppWindow, st: &App) {
     }
 }
 
+// ---------------------------------------------------------------- 查找（Ctrl+F）
+
+/// 查找条上输入了什么 / 换了比较方式：不立刻扫，先把文字 / “查找中…”推到界面，
+/// 记下去抖要到什么时候；停顿 FIND_DEBOUNCE 后由界面层的定时器调 `find_debounced` 才真正扫。
+pub(crate) fn find_start(
+    weak: &slint::Weak<AppWindow>,
+    state: &Arc<Mutex<App>>,
+    text: String,
+    ignore_case: bool,
+    column: Option<usize>,
+) {
+    let Some(app) = weak.upgrade() else { return };
+    let mut st = state.lock().unwrap();
+    // 点“忽略大小写”开关文字传空：只换比较方式，文字照旧
+    let text = if text.is_empty() && st.find.text.is_empty() { return } else { text };
+    st.find.open = true;
+    st.find.ignore_case = ignore_case;
+    st.find.column = column;
+    st.find.pending_text = text;
+    st.find.debounce_at = Some(std::time::Instant::now() + FIND_DEBOUNCE);
+    st.find.debouncing = true;
+    push_find(&app, &st);
+}
+
+/// 去抖定时器到时（界面层的 Timer 回掉这里）：把待扫的文字真正用起来。
+pub(crate) fn find_debounced(weak: &slint::Weak<AppWindow>, state: &Arc<Mutex<App>>) {
+    let (text, ic, column) = {
+        let mut st = state.lock().unwrap();
+        if !st.find.debouncing {
+            return;
+        }
+        st.find.debouncing = false;
+        st.find.debounce_at = None;
+        let text = std::mem::take(&mut st.find.pending_text);
+        let ic = st.find.ignore_case;
+        let column = st.find.column;
+        (text, ic, column)
+    };
+    find_start_impl(weak, state, text, ic, column);
+}
+
+/// 真正开始扫一遍（去抖后 / 回车立刻扫时调用）。
+fn find_start_impl(
+    weak: &slint::Weak<AppWindow>,
+    state: &Arc<Mutex<App>>,
+    text: String,
+    ignore_case: bool,
+    column: Option<usize>,
+) {
+    let Some(app) = weak.upgrade() else { return };
+    {
+        let mut st = state.lock().unwrap();
+        st.find.ticket += 1;
+        st.find.text = text;
+        st.find.ignore_case = ignore_case;
+        st.find.column = column;
+        st.find.hits.clear();
+        st.find.current = -1;
+        st.find.scanned = 0;
+        st.find.done = false;
+        st.find.running = false;
+        st.find.open = true;
+        let (n_rows, n_cols) =
+            st.sheets.get(st.current).map_or((0, 0), |s| (s.source.row_count(), s.source.headers().len()));
+        st.find.n_rows = n_rows;
+        st.find.n_cols = n_cols;
+        push_find(&app, &st);
+        if st.find.text.is_empty() || st.find.n_rows == 0 || st.find.n_cols == 0 {
+            return;
+        }
+    }
+    find_scan(weak, state);
+}
+
+/// 后台接着扫：一次扫 ROW_BLOCK 行，边扫边把命中的格子加进去。
+fn find_scan(weak: &slint::Weak<AppWindow>, state: &Arc<Mutex<App>>) {
+    let (ticket, text, ignore_case, column, start, n_rows, n_cols, source) = {
+        let mut st = state.lock().unwrap();
+        if st.find.running || st.find.done || st.find.text.is_empty() {
+            return;
+        }
+        let Some(src) = st.sheets.get(st.current).map(|s| s.source.clone()) else { return };
+        st.find.running = true;
+        st.find.n_rows = src.row_count();
+        st.find.n_cols = src.headers().len();
+        // 列的编号可能在换表后失效：对不上就当全表
+        let column = st.find.column.filter(|&c| c < src.headers().len());
+        let f = &mut st.find;
+        (f.ticket, f.text.clone(), f.ignore_case, column, f.scanned, f.n_rows, f.n_cols, src)
+    };
+    let weak = weak.clone();
+    let state = state.clone();
+    std::thread::spawn(move || {
+        let needle = if ignore_case { text.to_lowercase() } else { text.clone() };
+        let end = (start + FIND_BATCH).min(n_rows);
+        // 只在某一列找时只请求那一列（scan 只填这些列，返回的 cells 也是按这个顺序）
+        let cols: Vec<usize> = match column {
+            Some(c) => vec![c],
+            None => (0..n_cols).collect(),
+        };
+        let mut hits: Vec<(usize, usize)> = Vec::new();
+        source.scan(start, end.saturating_sub(start), &cols, &mut |r, cells| {
+            for (i, cell) in cells.iter().enumerate() {
+                let hit = if ignore_case { cell.to_lowercase().contains(&needle) } else { cell.contains(&needle) };
+                if hit {
+                    // 只扫一列时 cells[0] 是那一列，列号要换算回真实列
+                    hits.push((r, cols[i]));
+                }
+            }
+        });
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(app) = weak.upgrade() else { return };
+            let mut st = state.lock().unwrap();
+            if st.find.ticket != ticket || st.find.text.is_empty() {
+                return; // 又改了查找的文字：这批结果作废
+            }
+            st.find.running = false;
+            st.find.scanned = end;
+            st.find.done = st.find.scanned >= st.find.n_rows;
+            let had = st.find.hits.len();
+            st.find.hits.extend(hits);
+            // 第一批命中：自动跳过去
+            if had == 0 && !st.find.hits.is_empty() && st.find.current < 0 {
+                st.find.current = 0;
+            }
+            push_find(&app, &st);
+            let more = !st.find.done;
+            drop(st);
+            if more {
+                find_scan(&weak, &state);
+            }
+        });
+    });
+}
+
+/// 跳到下一个（dir = 1）/ 上一个（-1）命中。
+pub(crate) fn find_step(weak: &slint::Weak<AppWindow>, state: &Arc<Mutex<App>>, dir: i32) {
+    let Some(app) = weak.upgrade() else { return };
+    let mut st = state.lock().unwrap();
+    let n = st.find.hits.len();
+    if n == 0 {
+        // 去抖里还压着没扫的文字：先把它扫了（扫完会自动跳到第一个命中）
+        if st.find.debouncing && !st.find.pending_text.is_empty() {
+            st.find.debouncing = false;
+            st.find.debounce_at = None;
+            let text = std::mem::take(&mut st.find.pending_text);
+            let ic = st.find.ignore_case;
+            let column = st.find.column;
+            drop(st);
+            find_start_impl(weak, state, text, ic, column);
+            return;
+        }
+        // 还没扫出结果：从头再扫一遍（文字没变过的话编号也不变，结果直接接着用）
+        if !st.find.text.is_empty() && !st.find.running {
+            st.find.ticket += 1;
+            st.find.hits.clear();
+            st.find.current = -1;
+            st.find.scanned = 0;
+            st.find.done = false;
+            drop(st);
+            find_scan(weak, state);
+        }
+        return;
+    }
+    let cur = st.find.current;
+    st.find.current = if dir >= 0 { (cur + 1).rem_euclid(n as i32) } else { (cur - 1).rem_euclid(n as i32) };
+    push_find(&app, &st);
+}
+
+/// 打开查找条（Ctrl+F）：保留上次的搜索词和命中，全选方便改；清掉去抖状态。
+/// 打开时如果表格里正选着整列（一列），查找范围就跟着是那一列；否则全表。
+pub(crate) fn find_open(weak: &slint::Weak<AppWindow>, state: &Arc<Mutex<App>>) {
+    let Some(app) = weak.upgrade() else { return };
+    let (scope_changed, text, ic, empty) = {
+        let mut st = state.lock().unwrap();
+        st.find.open = true;
+        st.find.pending_text = st.find.text.clone();
+        st.find.debouncing = false;
+        st.find.debounce_at = None;
+        // 选着整列（不是整行 / 全选）时，范围跟着 selection 走
+        let selected = if app.get_sel_active() && app.get_sel_cols() && !app.get_sel_rows() {
+            let (c0, c1) = (app.get_sel_c0(), app.get_sel_c1());
+            let n_cols = st.sheets.get(st.current).map_or(0, |s| s.source.headers().len());
+            if c0 == c1 && c0 >= 0 && (c0 as usize) < n_cols {
+                Some(c0 as usize)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let changed = st.find.column != selected;
+        st.find.column = selected;
+        push_find(&app, &st);
+        (changed, st.find.text.clone(), st.find.ignore_case, st.find.text.is_empty())
+    };
+    // 上次搜的词还在、范围又变了：按新范围重扫一遍（不然高亮对不上）
+    if scope_changed && !empty {
+        let column = state.lock().unwrap().find.column;
+        find_start_impl(weak, state, text, ic, column);
+    }
+}
+
+/// 查找的范围：只在某一列找（None = 全表）。范围下拉换项 / 表格里选整列时调。
+/// 范围没变就什么都不做（免得选区变化和打开查找互相触发重扫）。
+pub(crate) fn find_set_column(weak: &slint::Weak<AppWindow>, state: &Arc<Mutex<App>>, column: Option<usize>) {
+    let Some(app) = weak.upgrade() else { return };
+    let (text, ic, empty) = {
+        let mut st = state.lock().unwrap();
+        if st.find.column == column {
+            return;
+        }
+        st.find.column = column;
+        (st.find.text.clone(), st.find.ignore_case, st.find.text.is_empty())
+    };
+    if empty {
+        push_find(&app, &state.lock().unwrap());
+        return;
+    }
+    // 换了范围从头扫（立刻扫，不等去抖：这是点选，不是打字）
+    find_start_impl(weak, state, text, ic, column);
+}
+
+/// 关掉查找条（Esc / ×）：命中高亮也去掉。搜索词留着，下次 Ctrl+F 直接是上次那个词。
+pub(crate) fn find_close(app: &AppWindow, st: &mut App) {
+    st.find.open = false;
+    st.find.hits.clear();
+    st.find.current = -1;
+    st.find.scanned = 0;
+    st.find.ticket += 1;
+    st.find.running = false;
+    st.find.done = false;
+    st.find.debouncing = false;
+    st.find.debounce_at = None;
+    push_find(app, st);
+}
+
+/// 把查找的状态推到界面：查找条开着没有、文字、第几个 / 共几个、命中的格子、跳到哪。
+fn push_find(app: &AppWindow, st: &App) {
+    app.set_find_open(st.find.open);
+    // 去抖里压着没扫的文字：显示它（界面那栏也切过去），让用户看到自己刚打的字
+    app.set_find_text(SharedString::from(
+        if st.find.debouncing { st.find.pending_text.as_str() } else { st.find.text.as_str() },
+    ));
+    app.set_find_count(SharedString::from(if st.find.text.is_empty() {
+        String::new()
+    } else if st.find.hits.is_empty() && !st.find.done {
+        String::from("查找中…")
+    } else if st.find.hits.is_empty() {
+        String::from("没有找到")
+    } else {
+        format!("{} / {}{}", st.find.current.max(0) + 1, fmt_count(st.find.hits.len()), if st.find.done { "" } else { "+" })
+    }));
+    app.set_find_current(st.find.current);
+    app.set_find_epoch(app.get_find_epoch() + 1);
+    let hit = st.find.hits.get(st.find.current.max(0) as usize).copied();
+    app.set_find_row(hit.map_or(-1, |(r, _)| r as i32));
+    app.set_find_col(hit.map_or(-1, |(_, c)| c as i32));
+    // 命中列的左边缘 / 宽：界面滚到那一列用（Rust 这边有算好的列宽）
+    let col = hit.map(|(_, c)| c);
+    app.set_find_col_x(col.map_or(0.0, |c| st.col_widths.iter().take(c).sum()));
+    app.set_find_col_w(col.and_then(|c| st.col_widths.get(c).copied()).unwrap_or(100.0));
+    // 范围下拉：-1 = 全表，>= 0 是列的下标
+    app.set_find_scope(st.find.column.map_or(-1, |c| c as i32));
+    app.set_find_scope_names(scope_names(st));
+}
+
+/// 范围下拉的项：“全表” + 各列名。
+fn scope_names(st: &App) -> ModelRc<SharedString> {
+    let mut names = vec![SharedString::from("全表")];
+    if let Some(sheet) = st.sheets.get(st.current) {
+        names.extend(sheet.source.headers().iter().map(|h| SharedString::from(h.as_str())));
+    }
+    ModelRc::new(VecModel::from(names))
+}
+
+/// 一格是不是查找命中的（界面画黄底用）。命中表按行、列排好，二分找。
+pub(crate) fn find_hit_at(st: &App, r: i32, c: i32) -> bool {
+    let (Ok(r), Ok(c)) = (usize::try_from(r), usize::try_from(c)) else { return false };
+    st.find.hits.binary_search(&(r, c)).is_ok()
+}
+
 pub(crate) fn update_busy(app: &AppWindow, st: &App) {
     let loading = st.sheets.get(st.current).is_some_and(|s| s.source.is_loading());
     app.set_busy(loading || st.running || st.writing);
@@ -365,12 +686,12 @@ mod tests {
     fn selection_text_is_excel_friendly() {
         let src = csv_source();
         let rows = src.window(0, 3);
-        let block = selection_text(src.as_ref(), 1..3, &[0, 2], false);
+        let block = selection_text(src.as_ref(), 1..3, &[0, 2], false, CopyFmt::Tsv);
         assert_eq!(block, format!("{}\t{}\r\n{}\t{}\r\n", rows[1][0], rows[1][2], rows[2][0], rows[2][2]));
-        let headed = selection_text(src.as_ref(), 0..1, &[1], true);
+        let headed = selection_text(src.as_ref(), 0..1, &[1], true, CopyFmt::Tsv);
         assert_eq!(headed, format!("{}\r\n{}\r\n", src.headers()[1], rows[0][1]));
-        assert_eq!(selection_text(src.as_ref(), 2..3, &[3], false), rows[2][3]);
-        assert_eq!(selection_text(src.as_ref(), 0..0, &[0], false), "");
+        assert_eq!(selection_text(src.as_ref(), 2..3, &[3], false, CopyFmt::Tsv), rows[2][3]);
+        assert_eq!(selection_text(src.as_ref(), 0..0, &[0], false, CopyFmt::Tsv), "");
         let mut cell = String::new();
         push_cell(&mut cell, "a\tb \"c\"");
         assert_eq!(cell, "\"a\tb \"\"c\"\"\"");

@@ -675,7 +675,7 @@ fn push_light(app: &AppWindow, st: &App) {
 // ---------------------------------------------------------------- 打开、改、确定
 
 /// 参数面板上点了“编辑”：读回参数里的条件树，弹出编辑器。
-fn open(weak: &slint::Weak<AppWindow>, state: &Arc<Mutex<App>>, param: usize) {
+pub(crate) fn open(weak: &slint::Weak<AppWindow>, state: &Arc<Mutex<App>>, param: usize) {
     let Some(app) = weak.upgrade() else { return };
     let mut st = state.lock().unwrap();
     let (path, Some(node)) = st.param_target() else { return };

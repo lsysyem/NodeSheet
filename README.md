@@ -136,6 +136,11 @@ out = df.with_row_index("index", offset=ch("start"))
 # 1. 引擎依赖
 pip install -U "polars>=2.0.0" fastexcel xlsxwriter
 
+# 1.5 Excel 读取加速（推荐）：用 calamine 的 fork 重编 fastexcel
+#     xlsx 并行解析 + 文本列直接写 Arrow；大表约 3.5s → 1s
+#     需要 Rust；fork 默认在 D:\calamine，可以 --calamine 指定
+python engine/build_fastexcel.py --install
+
 # 2. 生成表达式节点目录（升级 polars 后重新生成）
 python engine/gen_catalog.py
 
